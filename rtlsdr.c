@@ -56,7 +56,7 @@ struct sdr {
   int holdoff_counter; // Time delay when we adjust gains
   int gain;      // Gain passed to manual gain setting
   float scale;         // Scale samples for #bits and front end gain
-
+  int calibrate;      // Calibrate (ppm) setting
   // Sample statistics
   //  int clips;  // Sample clips since last reset
   //  float DC;      // DC offset for real samples
@@ -149,10 +149,17 @@ int rtlsdr_setup(struct frontend *frontend,dictionary *dictionary,char const *se
   }
   rtlsdr_set_direct_sampling(sdr->device, 0); // That's for HF
   rtlsdr_set_offset_tuning(sdr->device,0); // Leave the DC spike for now
-  rtlsdr_set_freq_correction(sdr->device,0); // don't use theirs, only good to integer ppm
   rtlsdr_set_tuner_bandwidth(sdr->device, 0); // Auto bandwidth
   rtlsdr_set_agc_mode(sdr->device,0);
 
+  sdr->calibrate = config_getint(dictionary,section,"calibrate",0);
+  frontend->calibrate = sdr->calibrate;
+  {
+    int ret = rtlsdr_set_freq_correction(sdr->device,sdr->calibrate);
+    if(ret != 0){
+      fprintf(stderr,"rtlsdr_set_req_correction(%d) failed\n",sdr->calibrate);
+    }
+  }
   sdr->agc = config_getboolean(dictionary,section,"agc",false);
 
   if(sdr->agc){
@@ -198,7 +205,6 @@ int rtlsdr_setup(struct frontend *frontend,dictionary *dictionary,char const *se
     frontend->lock = true;
   }
 
-  frontend->calibrate = config_getdouble(dictionary,section,"calibrate",0);
   fprintf(stdout,"%s, samprate %'d Hz, agc %d, gain %d, bias %d, init freq %'.3lf Hz, calibrate %.3g\n",
 	  frontend->description,frontend->samprate,sdr->agc,sdr->gain,sdr->bias,init_frequency,
 	  frontend->calibrate);
@@ -406,7 +412,8 @@ static double true_freq(uint64_t freq_hz){
 
 static double set_correct_freq(struct sdr * const sdr,double freq){
   struct frontend * const frontend = sdr->frontend;
-  int64_t intfreq = round(freq / (1 + frontend->calibrate));
+  int64_t intfreq = round(freq);
+  //int64_t intfreq = round(freq / (1 + frontend->calibrate));
   rtlsdr_set_center_freq(sdr->device,intfreq);
 #ifdef USE_NEW_LIBRTLSDR
   double tf = rtlsdr_get_freq(sdr->device);
@@ -414,7 +421,8 @@ static double set_correct_freq(struct sdr * const sdr,double freq){
   double tf = true_freq(rtlsdr_get_center_freq(sdr->device)); // We correct the original imprecise version
 #endif
 
-  frontend->frequency = tf * (1 + frontend->calibrate);
+  frontend->frequency = tf;
+  //frontend->frequency = tf * (1 + frontend->calibrate);
   return frontend->frequency;
 }
 
