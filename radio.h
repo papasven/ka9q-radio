@@ -22,7 +22,9 @@
 #include "filter.h"
 #include "iir.h"
 
-// The four demodulator types
+/**
+   @brief The four demodulator types
+ */
 enum demod_type {
   LINEAR_DEMOD = 0,     // Linear demodulation, i.e., everything else: SSB, CW, DSB, CAM, IQ
   FM_DEMOD,             // Frequency/phase demodulation
@@ -31,6 +33,9 @@ enum demod_type {
   N_DEMOD,              // Dummy equal to number of valid entries
 };
 
+/**
+   @brief list of demodulator enums and readable strings
+*/
 struct demodtab {
   enum demod_type type;
   char name[16];
@@ -41,7 +46,9 @@ extern struct demodtab Demodtab[];
 char const *demod_name_from_type(enum demod_type type);
 int demod_type_from_name(char const *name);
 
-// Only one off these per radiod instance, shared with all channels
+/**
+@brief Front end control block, one per radiod instance
+*/
 struct frontend {
 
   // Stuff we maintain about our upstream source
@@ -109,14 +116,17 @@ struct frontend {
 
 extern struct frontend Frontend; // Only one per radio instance
 
-// Channel state block; there can be many of these
-// This is primarily for radiod, but it is also used by 'control' and 'monitor' to shadow
-// radiod's state, encoded for network transmission by send_radio_status and decoded by decode_radio_status().
-// The transfer protocol uses a series of TLV-encoded tuples that do *not* send every element of this
-// structure, so shadow copies can be incomplete.
+/**
+@brief  radiod channel state block
 
-// Be careful with memcpy(): there are a few pointers (filter.energies, spectrum.bin_data, status.command, etc)
-// If you use these in shadow copies you must malloc these arrays yourself.
+This is primarily for radiod, but it is also used by 'control' and 'monitor' to shadow
+radiod's state, encoded for network transmission by send_radio_status() and decoded by decode_radio_status().
+The transfer protocol uses a series of TLV-encoded tuples that do *not* send every element of this
+structure, so shadow copies can be incomplete.
+
+Be careful with memcpy(): there are a few pointers (filter.energies, spectrum.bin_data, status.command, etc)
+If you use these in shadow copies you must malloc these arrays yourself.
+*/
 struct channel {
   bool inuse;
   int lifetime;          // Remaining lifetime, frames
@@ -154,13 +164,6 @@ struct channel {
     float hangtime;      // AGC hang time, samples (settable)
     float recovery_rate; // AGC recovery rate, amplitude ratio/sample  (settable)
     float threshold;     // AGC threshold above noise, amplitude ratio
-
-    bool pll;         // Linear mode PLL tracking of carrier (settable)
-    bool square;      // Squarer on PLL input (settable)
-    bool pll_lock;    // PLL is locked
-    float loop_bw;    // Loop bw (coherent modes)
-    float cphase;     // Carrier phase change radians (DSB/PSK)
-    int64_t rotations; // Integer counts of cphase wraps through -PI, +PI
   } linear;
   int hangcount;      // AGC hang timer before gain recovery starts
 
@@ -168,6 +171,12 @@ struct channel {
     struct pll pll;
     bool was_on;
     int lock_count;
+    bool enable;         // Linear mode PLL tracking of carrier (settable)
+    bool square;      // Squarer on PLL input (settable)
+    bool lock;    // PLL is locked
+    float loop_bw;    // Loop bw (coherent modes)
+    float cphase;     // Carrier phase change radians (DSB/PSK)
+    int64_t rotations; // Integer counts of cphase wraps through -PI, +PI
   } pll;
 
   // Signal levels & status, common to all demods
@@ -204,7 +213,7 @@ struct channel {
 
   // Output
   struct {
-    int samprate;      // Audio D/A sample rate
+    unsigned int samprate;      // Audio D/A sample rate
     float gain;        // Audio gain to normalize amplitude
     float sum_gain_sq; // Sum of squared gains, for averaging
     float headroom;    // Audio level headroom, amplitude ratio (settable)
@@ -216,7 +225,7 @@ struct channel {
     struct sockaddr_storage dest_socket;      // Dest of our data output (typically multicast)
     char dest_string[_POSIX_HOST_NAME_MAX+20]; // Allow room for :portnum
 
-    int channels;   // 1 = mono, 2 = stereo (settable)
+    unsigned int channels;   // 1 = mono, 2 = stereo (settable)
     float energy;   // Output energy since last poll
 
     float deemph_state_left;
@@ -224,10 +233,14 @@ struct channel {
     uint64_t samples;
     bool pacing;     // Pace output packets
     enum encoding encoding;
-    enum encoding previous_encoding;
     OpusEncoder *opus;
-    int opus_channels;
-    int opus_bitrate;
+    unsigned int opus_channels;
+    unsigned int opus_bitrate;
+    float *queue; // Mirrored ring buffer
+    size_t queue_size; // Size of allocation, in floats
+    unsigned wp,rp; // Queue write and read indices
+    unsigned minpacket;  // minimum output packet size in blocks (0-3)
+                         // i.e, no minimum or at least 20ms, 40ms or 60ms/packet
   } output;
 
   struct {
@@ -271,6 +284,7 @@ extern int Output_fd;
 extern struct sockaddr_storage Metadata_dest_socket; // Socket for main metadata
 extern int Verbose;
 extern float Blocktime; // Common to all receiver slices. NB! Milliseconds, not seconds
+extern char const *Channel_keys[],*Global_keys[];
 
 // Channel initialization & manipulation
 struct channel *create_chan(uint32_t ssrc);
@@ -296,16 +310,18 @@ void *sap_send(void *);
 void *radio_status(void *);
 
 // Demodulator thread entry points
-void *demod_fm(void *);
-void *demod_wfm(void *);
-void *demod_linear(void *);
-void *demod_spectrum(void *);
+int demod_fm(void *);
+int demod_wfm(void *);
+int demod_linear(void *);
+int demod_spectrum(void *);
 
 int send_output(struct channel * restrict ,const float * restrict,int,bool);
 int send_radio_status(struct sockaddr const *,struct frontend const *, struct channel *);
 int reset_radio_status(struct channel *chan);
 bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length);
 int decode_radio_status(struct frontend *frontend,struct channel *channel,uint8_t const *buffer,int length);
+int flush_output(struct channel *chan,bool marker,bool complete);
 
-int round_samprate(int x);
+
+unsigned int round_samprate(unsigned int x);
 #endif

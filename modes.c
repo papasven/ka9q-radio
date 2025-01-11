@@ -53,6 +53,60 @@ static float const DEFAULT_WFM_DEEMPH_GAIN = 0.0;
 static int   const DEFAULT_BITRATE = 0;       // Default Opus compressed bit rate. 0 means OPUS_AUTO, the encoder decides
 extern int Overlap;
 
+// Valid keys in presets file, [global] section, and any channel section
+char const *Channel_keys[] = {
+  "disable",
+  "data",
+  "demod",
+  "mode",
+  "preset",
+
+  "samprate",
+  "mono",
+  "stereo",
+  "low",
+  "high",
+  "squelch-open",
+  "squelch-close",
+  "squelchtail",
+  "squelch-tail",
+  "headroom",
+  "shift",
+  "recovery-rate",
+  "hang-time",
+  "threshold",
+  "gain",
+  "envelope",
+  "pll",
+  "square",
+  "conj",
+  "pll-bw",
+  "agc",
+  "extend",
+  "threshold-extend",
+  "deemph-tc",
+  "deemph-gain",
+  "tone",
+  "pl",
+  "ctcss",
+  "pacing",
+  "encoding",
+  "bitrate",
+  "update",
+  "buffer",
+  "freq",
+  "freq0",
+  "freq1",
+  "freq2",
+  "freq3",
+  "freq4",
+  "freq5",
+  "freq6",
+  "freq7",
+  "freq8",
+  "freq9",
+  NULL
+};
 
 int demod_type_from_name(char const *name){
   for(enum demod_type n = 0; n < N_DEMOD; n++){
@@ -99,10 +153,10 @@ int set_defaults(struct channel *chan){
   if(chan->output.gain <= 0 || isnan(chan->output.gain))
      chan->output.gain = dB2voltage(DEFAULT_GAIN); // Set only if out of bounds
   chan->linear.env = false;
-  chan->linear.pll = false;
-  chan->linear.square = false;
+  chan->pll.enable = false;
+  chan->pll.square = false;
   chan->filter.isb = false;
-  chan->linear.loop_bw = DEFAULT_PLL_BW;
+  chan->pll.loop_bw = DEFAULT_PLL_BW;
   chan->linear.agc = true;
   chan->output.samprate = round_samprate(DEFAULT_LINEAR_SAMPRATE); // Don't trust even a compile constant
   chan->output.encoding = S16BE;
@@ -115,6 +169,7 @@ int set_defaults(struct channel *chan){
   chan->output.pacing = false;
   chan->status.output_interval = DEFAULT_UPDATE;
   chan->output.silent = true; // Prevent burst of FM status messages on output channel at startup
+  chan->output.minpacket = 0;  // No output buffering
   return 0;
 }
 
@@ -216,13 +271,13 @@ int loadpreset(struct channel *chan,dictionary const *table,char const *sname){
     }
   }
   chan->linear.env = config_getboolean(table,sname,"envelope",chan->linear.env);
-  chan->linear.pll = config_getboolean(table,sname,"pll",chan->linear.pll);
-  chan->linear.square = config_getboolean(table,sname,"square",chan->linear.square);  // On implies PLL on
-  if(chan->linear.square)
-    chan->linear.pll = true; // Square implies PLL
+  chan->pll.enable = config_getboolean(table,sname,"pll",chan->pll.enable);
+  chan->pll.square = config_getboolean(table,sname,"square",chan->pll.square);  // On implies PLL on
+  if(chan->pll.square)
+    chan->pll.enable = true; // Square implies PLL
 
   chan->filter.isb = config_getboolean(table,sname,"conj",chan->filter.isb);       // (unimplemented anyway)
-  chan->linear.loop_bw = config_getfloat(table,sname,"pll-bw",chan->linear.loop_bw);
+  chan->pll.loop_bw = config_getfloat(table,sname,"pll-bw",chan->pll.loop_bw);
   chan->linear.agc = config_getboolean(table,sname,"agc",chan->linear.agc);
   chan->fm.threshold = config_getboolean(table,sname,"extend",chan->fm.threshold); // FM threshold extension
   chan->fm.threshold = config_getboolean(table,sname,"threshold-extend",chan->fm.threshold); // FM threshold extension
@@ -257,6 +312,8 @@ int loadpreset(struct channel *chan,dictionary const *table,char const *sname){
   }
   chan->output.opus_bitrate = config_getint(table,sname,"bitrate",chan->output.opus_bitrate);
   chan->status.output_interval = config_getint(table,sname,"update",chan->status.output_interval);
+  chan->output.minpacket = config_getint(table,sname,"buffer",chan->output.minpacket);
+
   return 0;
 }
 
@@ -268,7 +325,7 @@ int loadpreset(struct channel *chan,dictionary const *table,char const *sname){
 
 // Should sample rates be integers when the block rate could in principle not be?
 // Usually Blocktime = 20.0000 ms (50.00000 Hz), which avoids the problem
-int round_samprate(int x){
+unsigned int round_samprate(unsigned int x){
   float const baserate = (1000. / Blocktime) * (Overlap - 1);
 
   if(x < baserate)

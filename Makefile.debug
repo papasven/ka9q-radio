@@ -35,7 +35,6 @@ all: $(DAEMONS) $(EXECS)
 # NB: no longer copies files to /etc/radio. Must be installed manually.
 install: $(DAEMONS) $(EXECS)
 	/usr/sbin/adduser --quiet --system --group radio
-	/usr/sbin/adduser --quiet --system --ingroup radio recordings
 	/usr/sbin/adduser --quiet --system --ingroup radio aprsfeed
 	rsync -a aux/98-sockbuf.conf /etc/sysctl.d
 	sysctl --quiet -p /etc/sysctl.d/98-sockbuf.conf
@@ -95,7 +94,7 @@ metadump: metadump.o libradio.a
 	$(CC) $(LDOPTS) -o $@ $^ -lbsd -lm -lpthread
 
 monitor: monitor.o monitor-data.o monitor-display.o monitor-repeater.o libradio.a
-	$(CC) $(LDOPTS) -o $@ $^ -lopus -lportaudio -lasound -lncursesw -liniparser -lbsd -lm -lpthread
+	$(CC) $(LDOPTS) -o $@ $^ -lsamplerate -lopus -lportaudio -lasound -lncursesw -liniparser -lbsd -lm -lpthread
 
 opusd: opusd.o libradio.a
 	$(CC) $(LDOPTS) -o $@ $^ -lopus -lavahi-client -lavahi-common -lbsd -lm -lpthread

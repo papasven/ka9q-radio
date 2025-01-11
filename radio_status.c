@@ -162,10 +162,11 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
     case OUTPUT_SAMPRATE:
       // Restart the demodulator to recalculate filters, etc
       {
-	int const new_sample_rate = round_samprate(decode_int(cp,optlen)); // Force to multiple of block rate
+	unsigned int const new_sample_rate = round_samprate(decode_int(cp,optlen)); // Force to multiple of block rate
 	// If using Opus, ignore unsupported sample rates
 	if(new_sample_rate != chan->output.samprate){
 	  if(chan->output.encoding != OPUS || new_sample_rate == 48000 || new_sample_rate == 24000 || new_sample_rate == 16000 || new_sample_rate == 12000 || new_sample_rate == 8000){
+	    flush_output(chan,false,true); // Flush to Ethernet before we change this
 	    chan->output.samprate = new_sample_rate;
 	    chan->output.rtp.type = pt_from_info(chan->output.samprate,chan->output.channels,chan->output.encoding);
 	    restart_needed = true;
@@ -244,8 +245,9 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
 	strlcpy(chan->preset,p,sizeof(chan->preset));
 	FREE(p); // decode_string now allocs memory
 	{
+	  flush_output(chan,false,true); // Flush to Ethernet before we change this
 	  enum demod_type const old_type = chan->demod_type;
-	  int const old_samprate = chan->output.samprate;
+	  unsigned int const old_samprate = chan->output.samprate;
 	  float const old_low = chan->filter.min_IF;
 	  float const old_high = chan->filter.max_IF;
 	  float const old_kaiser = chan->filter.kaiser_beta;
@@ -329,25 +331,26 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
       }
       break;
     case PLL_ENABLE:
-      chan->linear.pll = decode_bool(cp,optlen);
+      chan->pll.enable = decode_bool(cp,optlen);
       break;
     case PLL_BW:
       {
 	float const f = decode_float(cp,optlen); // Always 0 or positive
 	if(isfinite(f))
-	  chan->linear.loop_bw = fabsf(f);
+	  chan->pll.loop_bw = fabsf(f);
       }
       break;
     case PLL_SQUARE:
-      chan->linear.square = decode_bool(cp,optlen);
+      chan->pll.square = decode_bool(cp,optlen);
       break;
     case ENVELOPE:
       chan->linear.env = decode_bool(cp,optlen);
       break;
     case OUTPUT_CHANNELS: // int
       {
-	int const i = decode_int(cp,optlen);
+	unsigned int const i = decode_int(cp,optlen);
 	if(i != chan->output.channels && (i == 1 || i == 2)){
+	  flush_output(chan,false,true); // Flush to Ethernet before we change this
 	  chan->output.channels = i;
 	  chan->output.rtp.type = pt_from_info(chan->output.samprate,chan->output.channels,chan->output.encoding);
 	}
@@ -400,6 +403,7 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
       {
 	enum encoding encoding = decode_int(cp,optlen);
 	if(encoding != chan->output.encoding && encoding >= NO_ENCODING && encoding < UNUSED_ENCODING){
+	  flush_output(chan,false,true); // Flush to Ethernet before we change this
 	  chan->output.encoding = encoding;
 	  // Opus can handle only a certain set of sample rates, and it operates at 48K internally
 	  if(encoding == OPUS && chan->output.samprate != 48000 && chan->output.samprate != 24000
@@ -440,6 +444,13 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
 	  (*Frontend.gain)(&Frontend,x);
       }
       break;
+    case MINPACKET:
+      {
+	int i = decode_int(cp,optlen);
+	if(i >=0 && i <=4)
+	   chan->output.minpacket = i;
+      }
+
     default:
       break;
     }
@@ -530,14 +541,14 @@ static int encode_radio_status(struct frontend const *frontend,struct channel co
   // Mode-specific params
   switch(chan->demod_type){
   case LINEAR_DEMOD:
-    encode_byte(&bp,PLL_ENABLE,chan->linear.pll); // bool
-    if(chan->linear.pll){
+    encode_byte(&bp,PLL_ENABLE,chan->pll.enable); // bool
+    if(chan->pll.enable){
       encode_float(&bp,FREQ_OFFSET,chan->sig.foffset);     // Hz; used differently in linear and fm
-      encode_byte(&bp,PLL_LOCK,chan->linear.pll_lock); // bool
-      encode_byte(&bp,PLL_SQUARE,chan->linear.square); //bool
-      encode_float(&bp,PLL_PHASE,chan->linear.cphase); // radians
-      encode_float(&bp,PLL_BW,chan->linear.loop_bw);   // hz
-      encode_int64(&bp,PLL_WRAPS,chan->linear.rotations); // count of complete 360-deg rotations of PLL phase
+      encode_byte(&bp,PLL_LOCK,chan->pll.lock); // bool
+      encode_byte(&bp,PLL_SQUARE,chan->pll.square); //bool
+      encode_float(&bp,PLL_PHASE,chan->pll.cphase); // radians
+      encode_float(&bp,PLL_BW,chan->pll.loop_bw);   // hz
+      encode_int64(&bp,PLL_WRAPS,chan->pll.rotations); // count of complete 360-deg rotations of PLL phase
       // Relevant only when squelches are active
       encode_float(&bp,SQUELCH_OPEN,power2dB(chan->fm.squelch_open));
       encode_float(&bp,SQUELCH_CLOSE,power2dB(chan->fm.squelch_close));
@@ -637,6 +648,7 @@ static int encode_radio_status(struct frontend const *frontend,struct channel co
     encode_byte(&bp,RTP_PT,chan->output.rtp.type);
     encode_int32(&bp,STATUS_INTERVAL,chan->status.output_interval);
     encode_int(&bp,OUTPUT_ENCODING,chan->output.encoding);
+    encode_int(&bp,MINPACKET,chan->output.minpacket);
   }
   // Don't send test points unless they're in use
   if(!isnan(chan->tp1))
