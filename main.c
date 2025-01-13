@@ -33,6 +33,7 @@
 #include <strings.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <dlfcn.h>
 
 #include "misc.h"
 #include "multicast.h"
@@ -65,6 +66,8 @@ int Overlap = DEFAULT_OVERLAP;
 static int Update = DEFAULT_UPDATE;
 static int RTCP_enable = false;
 static int SAP_enable = false;
+static void *Dl_handle;
+
 
 // List of valid config keys in [global] section, for error checking
 char const *Global_keys[] = {
@@ -481,6 +484,10 @@ static int loadconfig(char const *file){
     char default_status[strlen(hostname) + strlen(Name) + 20]; // Enough room for snprintf
     snprintf(default_status,sizeof(default_status),"%s-%s.local",hostname,Name);
     Metadata_dest_string = strdup(config_getstring(Configtable,global,"status",default_status)); // Status/command target for all demodulators
+    if(0 == strcmp(Metadata_dest_string,Data)){
+      fprintf(stdout,"Duplicate status/data stream names: data=%s, status=%s\n",Data,Metadata_dest_string);
+      exit(EX_USAGE);
+    }
   }
   {
     char ttlmsg[100];
@@ -516,17 +523,17 @@ static int loadconfig(char const *file){
   int nchans = 0;
   for(int sect = 0; sect < nsect; sect++){
     char const * const sname = iniparser_getsecname(Configtable,sect);
+
     if(strcasecmp(sname,global) == 0)
       continue; // Already processed above
     if(config_getstring(Configtable,sname,"device",NULL) != NULL)
       continue; // It's a front end configuration, ignore
 
-    config_validate_section(stdout,Configtable,sname,Channel_keys,NULL);
-
-    if(config_getboolean(Configtable,sname,"disable",false))
-	continue; // section is disabled
-
     fprintf(stdout,"Processing [%s]\n",sname); // log only if not disabled
+    config_validate_section(stdout,Configtable,sname,Channel_keys,NULL);
+    if(config_getboolean(Configtable,sname,"disable",false))
+      continue; // section is disabled
+
     // fall back to setting in [global] if parameter not specified in individual section
     // Set parameters even when unused for the current demodulator in case the demod is changed later
     char const * preset = config2_getstring(Configtable,Configtable,global,sname,"mode",NULL);
@@ -707,6 +714,7 @@ static int setup_hardware(char const *sname){
   }
   // Do we support it?
   // This should go into a table somewhere
+#ifndef FORCE_DYNAMIC
   if(strcasecmp(device,"rx888") == 0){
     Frontend.setup = rx888_setup;
     Frontend.start = rx888_startup;
@@ -742,9 +750,49 @@ static int setup_hardware(char const *sname){
     Frontend.start = sdrplay_startup;
     Frontend.tune = sdrplay_tune;
   #endif
-  } else {
-    fprintf(stdout,"device %s unrecognized\n",device);
-    return -1;
+  } else
+#endif
+  {
+    // Try to find it dynamically
+    char const *dlname = config_getstring(Configtable,device,"library",NULL);
+    if(dlname == NULL){
+      fprintf(stdout,"No dynamic library= entry found in [%s], device unrecognized\n",device);
+      return -1;
+    }
+    fprintf(stdout,"Dynamically loading SDR hardware driver %s\n",dlname);
+    char *error;
+    Dl_handle = dlopen(dlname,RTLD_GLOBAL|RTLD_NOW);
+    if(Dl_handle == NULL){
+      error = dlerror();
+      fprintf(stdout,"Error loading %s to handle device %s: %s\n",dlname,device,error);
+      return -1;
+    }
+    char symname[128];
+    snprintf(symname,sizeof(symname),"%s_setup",device);
+    Frontend.setup = dlsym(Dl_handle,symname);
+    if((error = dlerror()) != NULL){
+      fprintf(stdout,"error: symbol %s not found in %s for %s: %s\n",symname,dlname,device,error);
+      dlclose(Dl_handle);
+      return -1;
+    }
+    snprintf(symname,sizeof(symname),"%s_startup",device);
+    Frontend.start = dlsym(Dl_handle,symname);
+    if((error = dlerror()) != NULL){
+      fprintf(stdout,"error: symbol %s not found in %s for %s: %s\n",symname,dlname,device,error);
+      dlclose(Dl_handle);
+      return -1;
+    }
+    snprintf(symname,sizeof(symname),"%s_tune",device);
+    Frontend.tune = dlsym(Dl_handle,symname);
+    if((error = dlerror()) != NULL){
+      // Not fatal, but no tuning possible
+      fprintf(stdout,"warning: symbol %s not found in %s for %s: %s\n",symname,dlname,device,error);
+    }
+    // No error checking on these, they're optional
+    snprintf(symname,sizeof(symname),"%s_gain",device);
+    Frontend.gain = dlsym(Dl_handle,symname);
+    snprintf(symname,sizeof(symname),"%s_atten",device);
+    Frontend.atten = dlsym(Dl_handle,symname);
   }
 
   int r = (*Frontend.setup)(&Frontend,Configtable,sname);

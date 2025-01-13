@@ -29,6 +29,7 @@ Command-line options:
  --lengthlimit|--limit|-L <seconds>: maximum file duration, seconds. When new file is created, round down to previous start of interval and pad with silence (for JT decoding)
  --ssrc <ssrc>: Select one SSRC (recommended for --stdout)
  --version|-V: display command version
+ --max_length|-x: <seconds> maximum file duration, in seconds. Don't pad the wav file with silence. Exit when all files have reached max duration.
 @endverbatim
  */
 
@@ -170,11 +171,14 @@ struct session {
   int64_t samples_written;
   int64_t total_file_samples;
   int64_t samples_remaining;   // Samples remaining before file is closed; 0 means indefinite
+  struct timespec file_time;
+  bool complete;
 };
 
 
 static float SubstantialFileTime = 0.2;  // Don't record bursts < 250 ms unless they're between two substantial segments
 static double FileLengthLimit = 0; // Length of file in seconds; 0 = unlimited
+static double max_length = 0; // Length of recording in seconds; 0 = unlimited
 static const double Tolerance = 1.0; // tolerance for starting time in sec when FileLengthLimit is active
 int Verbose;
 static char PCM_mcast_address_text[256];
@@ -231,9 +235,10 @@ static struct option Options[] = {
   {"limit", required_argument, NULL, 'L'},
   {"ssrc", required_argument, NULL, 'S'},
   {"version", no_argument, NULL, 'V'},
+  {"max_length", required_argument, NULL, 'x'},
   {NULL, no_argument, NULL, 0},
 };
-static char Optstring[] = "cd:e:fjl:m:rsS:t:vL:V";
+static char Optstring[] = "cd:e:fjl:m:rsS:t:vL:Vx:";
 
 int main(int argc,char *argv[]){
   App_path = argv[0];
@@ -293,11 +298,14 @@ int main(int argc,char *argv[]){
     case 'L':
       FileLengthLimit = fabsf(strtof(optarg,NULL));
       break;
+    case 'x':
+      max_length = fabsf(strtof(optarg,NULL));
+      break;
     case 'V':
       VERSION();
       exit(EX_OK);
     default:
-      fprintf(stderr,"Usage: %s [-c|--catmode|--stdout] [-r|--raw] [-e|--exec command] [-f|--flush] [-s] [-d directory] [-l locale] [-L maxtime] [-t timeout] [-j|--jt] [-v] [-m sec] PCM_multicast_address\n",argv[0]);
+      fprintf(stderr,"Usage: %s [-c|--catmode|--stdout] [-r|--raw] [-e|--exec command] [-f|--flush] [-s] [-d directory] [-l locale] [-L maxtime] [-t timeout] [-j|--jt] [-v] [-m sec] [-x|--max_length max_file_time, no sync, oneshot] PCM_multicast_address\n",argv[0]);
       exit(EX_USAGE);
       break;
     }
@@ -440,7 +448,7 @@ static int emit_opus_silence(struct session * const sp,int samples){
     sp->total_file_samples += chunk;
     sp->current_segment_samples += chunk;
     sp->samples_written += chunk;
-    if(FileLengthLimit != 0)
+    if((FileLengthLimit != 0) || (max_length != 0))
       sp->samples_remaining -= chunk;
     if(sp->current_segment_samples >= SubstantialFileTime * sp->samprate)
       sp->substantial_file = true;
@@ -503,7 +511,7 @@ static int send_opus_queue(struct session * const sp,bool flush){
       sp->total_file_samples += samples;
       sp->current_segment_samples += samples;
       sp->samples_written += samples;
-      if(FileLengthLimit != 0)
+      if((FileLengthLimit != 0) || (max_length != 0))
 	sp->samples_remaining -= samples;
       if(sp->current_segment_samples >= SubstantialFileTime * sp->samprate)
 	sp->substantial_file = true;
@@ -573,7 +581,7 @@ static int send_wav_queue(struct session * const sp,bool flush){
 	sp->total_file_samples += jump;
 	sp->current_segment_samples += jump;
 	sp->samples_written += jump;
-	if(FileLengthLimit != 0)
+	if((FileLengthLimit != 0) || (max_length != 0))
 	  sp->samples_remaining -= jump;
       }
       // end of timestamp jump catch-up, send actual packets on queue
@@ -582,7 +590,7 @@ static int send_wav_queue(struct session * const sp,bool flush){
       sp->total_file_samples += frames;
       sp->current_segment_samples += frames;
       sp->samples_written += frames;
-      if(FileLengthLimit != 0)
+      if((FileLengthLimit != 0) || (max_length != 0))
 	sp->samples_remaining -= frames;
       if(sp->current_segment_samples >= SubstantialFileTime * sp->samprate)
 	sp->substantial_file = true;
@@ -750,7 +758,7 @@ static void input_loop(){
 	sp->prev = NULL;
 	Sessions = sp;
       }
-      if(sp->fp == NULL){
+      if(sp->fp == NULL && !sp->complete){
 	session_file_init(sp,&sender);
 	if(sp->encoding == OPUS){
 	  if(Raw)
@@ -841,7 +849,7 @@ static void input_loop(){
 	if(0 != fflush(sp->fp)){
 	  fprintf(stderr,"flush failed on '%s', %s\n",sp->filename,strerror(errno));
 	}
-      if(FileLengthLimit != 0 && sp->samples_remaining <= 0)
+      if(((FileLengthLimit != 0) || (max_length != 0)) && sp->samples_remaining <= 0)
 	close_file(sp); // Don't reset RTP here so we won't lose samples on the next file
 
     } // end of packet processing
@@ -965,6 +973,7 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
   struct timespec now;
   clock_gettime(CLOCK_REALTIME,&now);
   struct timespec file_time = now; // Default to actual time when length limit is not set
+  sp->file_time = file_time;
 
   if(FileLengthLimit > 0){ // Not really supported on opus yet
     // Pad start of first file with zeroes
@@ -993,7 +1002,7 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
       imaxdiv_t f = imaxdiv(start_ns,BILLION);
       file_time.tv_sec = f.quot + epoch; // restore original epoch
       file_time.tv_nsec = f.rem;
-
+      sp->file_time = file_time;
       sp->starting_offset = (sp->samprate * skip_ns) / BILLION;
       sp->total_file_samples += sp->starting_offset;
 #if 0
@@ -1003,6 +1012,9 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
 #endif
     }
     sp->samples_remaining = FileLengthLimit * sp->samprate - sp->starting_offset;
+  }
+  if (max_length > 0){
+    sp->samples_remaining = max_length * sp->samprate;
   }
   struct tm const * const tm = gmtime(&file_time.tv_sec);
   // yyyy-mm-dd-hh:mm:ss so it will sort properly
@@ -1179,7 +1191,7 @@ static int close_file(struct session *sp){
     fprintf(stderr,"%s closing '%s' %'.1f sec\n",
 	    sp->frontend.description,
 	    sp->filename, // might be blank
-            (float)sp->samples_written / (sp->samprate * sp->channels));
+            (float)sp->samples_written / sp->samprate);
   }
   if(Verbose > 1 && (sp->rtp_state.dupes != 0 || sp->rtp_state.drops != 0))
     fprintf(stderr,"ssrc %u dupes %llu drops %llu\n",sp->ssrc,(long long unsigned)sp->rtp_state.dupes,(long long unsigned)sp->rtp_state.drops);
@@ -1193,7 +1205,7 @@ static int close_file(struct session *sp){
       unlink(sp->filename);
       if(Verbose)
 	fprintf(stderr,"deleting %s %'.1f sec\n",sp->filename,
-		(float)sp->samples_written / (sp->samprate * sp->channels));
+		(float)sp->samples_written / sp->samprate);
     }
   }
   if(Command != NULL)
@@ -1206,6 +1218,18 @@ static int close_file(struct session *sp){
   sp->samples_written = 0;
   sp->total_file_samples = 0;
 
+  if (0 == max_length)
+    return 0;
+
+  sp->complete = true;        // don't create multiple files in max length mode
+  // check to see if all sessions are complete...if so, exit
+  for(sp = Sessions;sp != NULL;sp = sp->next){
+    if(!sp->complete){
+      return 0;
+    }
+  }
+  // max length active, all sessions are complete, exit
+  exit(EX_OK);  // Will call cleanup()
   return 0;
 }
 
@@ -1484,12 +1508,12 @@ static int end_wav_stream(struct session *sp){
   header.Subchunk2Size = statbuf.st_size - sizeof(header);
 
   // write number of samples (or is it frames?) into the fact chunk
-  header.SamplesLength = sp->samples_written / sp->channels;
+  header.SamplesLength = sp->samples_written;
 
   // write end time into the auxi chunk
   struct timespec now;
   clock_gettime(CLOCK_REALTIME,&now);
-  struct tm const * const tm = gmtime(&now.tv_sec);
+  struct tm const * tm = gmtime(&now.tv_sec);
   header.StopYear=tm->tm_year+1900;
   header.StopMon=tm->tm_mon+1;
   header.StopDOW=tm->tm_wday;
@@ -1498,6 +1522,16 @@ static int end_wav_stream(struct session *sp){
   header.StopMinute=tm->tm_min;
   header.StopSecond=tm->tm_sec;
   header.StopMillis=(int16_t)(now.tv_nsec / 1000000);
+
+  tm = gmtime(&sp->file_time.tv_sec);
+  header.StartYear = tm->tm_year + 1900;
+  header.StartMon = tm->tm_mon + 1;
+  header.StartDOW = tm->tm_wday;
+  header.StartDay = tm->tm_mday;
+  header.StartHour = tm->tm_hour;
+  header.StartMinute = tm->tm_min;
+  header.StartSecond = tm->tm_sec;
+  header.StartMillis = (int16_t)(sp->file_time.tv_nsec / 1000000);
 
   rewind(sp->fp);
   if(fwrite(&header,sizeof(header),1,sp->fp) != 1)
