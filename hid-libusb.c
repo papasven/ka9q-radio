@@ -997,9 +997,18 @@ static void cleanup_mutex(void *param)
 }
 
 
+#if defined(__GNUC__) && !defined(__clang__)  // GCC-only, exclude Clang
+  #if __GNUC__ >= 4
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wclobbered"
+  #endif
+#endif
+
+
 int hid_read_timeout(hid_device *dev, unsigned char *data, size_t length, int milliseconds)
 {
 	int bytes_read = -1;
+
 
 #if 0
 	int transferred;
@@ -1082,6 +1091,11 @@ ret:
 
 	return bytes_read;
 }
+#if defined(__GNUC__) && !defined(__clang__)
+  #if __GNUC__ >= 4
+    #pragma GCC diagnostic pop
+  #endif
+#endif
 
 int hid_read(hid_device *dev, unsigned char *data, size_t length)
 {
