@@ -29,6 +29,7 @@ extern const char *App_path;
 static float Power_smooth = 0.05; // Calculate this properly someday
 
 static char const *Airspyhf_keys[] = {
+  "library",
   "device",
   "serial",
   "samprate",
@@ -68,7 +69,7 @@ int airspyhf_setup(struct frontend * const frontend,dictionary * const Dictionar
   sdr->frontend = frontend;
   frontend->context = sdr;
   {
-    char const *device = config_getstring(Dictionary,section,"device",NULL);
+    char const *device = config_getstring(Dictionary,section,"device",section);
     if(strcasecmp(device,"airspyhf") != 0)
       return -1; // Not for us
   }

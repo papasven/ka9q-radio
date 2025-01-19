@@ -1,6 +1,6 @@
 // Core of KA9Q radiod
 // downconvert, filter, demodulate, multicast output
-// Copyright 2017-2023, Phil Karn, KA9Q, karn@ka9q.net
+// Copyright 2017-2025, Phil Karn, KA9Q, karn@ka9q.net
 #define _GNU_SOURCE 1
 #include <assert.h>
 #include <errno.h>
@@ -35,6 +35,7 @@
 #include <sys/stat.h>
 #include <dlfcn.h>
 
+#include "conf.h"
 #include "misc.h"
 #include "multicast.h"
 #include "radio.h"
@@ -72,6 +73,7 @@ static void *Dl_handle;
 // List of valid config keys in [global] section, for error checking
 char const *Global_keys[] = {
   "verbose",
+  "dns",
   "fft-time-limit",
   "fft-plan-level",
   "iface",
@@ -287,13 +289,21 @@ static int loadconfig(char const *file){
   if(file == NULL || strlen(file) == 0)
     return -1;
 
-  // Look for configuration directory with name ".d" appended
-  char dname[PATH_MAX];
-  snprintf(dname,sizeof(dname),"%s.d",file);
+
+  DIR *dirp = NULL;
   struct stat statbuf;
-  DIR *dirp;
-  if(stat(dname,&statbuf) == 0 && (statbuf.st_mode & S_IFMT) == S_IFDIR && (dirp = opendir(dname)) != NULL){
-    // Read and sort list of foo.d/*.conf files
+  if(stat(file,&statbuf) == 0 && (statbuf.st_mode & S_IFMT) == S_IFDIR){
+    // If the argument is a directory, read its contents
+    dirp = opendir(file);
+  } else {
+    // Otherwise append ".d" and see if that's a directory
+    char dname[PATH_MAX];
+    snprintf(dname,sizeof(dname),"%s.d",file);
+    if(stat(dname,&statbuf) == 0 && (statbuf.st_mode & S_IFMT) == S_IFDIR)
+      dirp = opendir(dname);
+  }
+  if(dirp != NULL){
+    // Read and sort list of foo.d/*.conf files, merge into temp file
     int dfd = dirfd(dirp); // this gets used for openat() and fstatat() so don't close dirp right way
     struct dirent *dp;
     char *subfiles[100]; // List of subfiles
@@ -309,27 +319,30 @@ static int loadconfig(char const *file){
     // Don't close dirp just yet, would invalidate dfd
     qsort(subfiles,sf,sizeof(subfiles[0]),(int (*)(void const *,void const *))strcmp);
 
-    // Concatenate original config and sorted subconfig files to temporary
+    // Create temporary copy of all files concatenated
     char template[PATH_MAX];
     strlcpy(template,"/tmp/radiod-configXXXXXXXX",sizeof(template));
     int tfd = mkstemp(template);
     FILE *tfp = fdopen(tfd,"rw+");
     if(tfp != NULL){
       // copy original file, if it exists, to temporary
-      FILE *fp = fopen(file,"r");
-      if(fp != NULL){
-	fprintf(tfp,"# %s\n",file); // for debugging
-	int c;
-	while((c = getc(fp)) != EOF)
-	  fputc(c,tfp);
-	fclose(fp);
-	fp = NULL;
+      if(stat(file,&statbuf) == 0 && (statbuf.st_mode & S_IFMT) == S_IFREG){
+	FILE *fp = fopen(file,"r");
+	if(fp != NULL){
+	  fprintf(tfp,"# %s\n",file); // for debugging
+	  int c;
+	  while((c = getc(fp)) != EOF)
+	    fputc(c,tfp);
+	  fclose(fp);
+	  fp = NULL;
+	}
       }
       // Concatenate the sub config files in order
       for(int i=0; i < sf; i++){
 	int fd;
+	FILE *fp;
 	if((fd = openat(dfd,subfiles[i],O_RDONLY)) != -1 && (fp = fdopen(fd,"r")) != NULL){ // There's no "fopenat()"
-	fprintf(tfp,"# %s\n",subfiles[i]); // for debugging
+	  fprintf(tfp,"# %s\n",subfiles[i]); // for debugging
 	  int c;
 	  while((c = getc(fp)) != EOF)
 	    fputc(c,tfp);
@@ -343,7 +356,7 @@ static int loadconfig(char const *file){
       unlink(template);
     } else {
       fprintf(stdout,"Can't create temp config file %s: %s\n",template,strerror(errno));
-      Configtable = iniparser_load(file); // Just read the primary
+      Configtable = iniparser_load(file); // Just try to read the primary
     }
   } else {
     Configtable = iniparser_load(file); // No subdirectory, just read the primary
@@ -360,6 +373,32 @@ static int loadconfig(char const *file){
   // Process [global] section applying to all demodulator blocks
   char const * const global = "global";
   Verbose = config_getint(Configtable,global,"verbose",Verbose);
+
+  // Set up the hardware early, in case it fails
+  const char *hardware = config_getstring(Configtable,global,"hardware",NULL);
+  if(hardware == NULL){
+    // 'hardware =' now required, no default
+    fprintf(stdout,"'hardware = [sectionname]' now required to specify front end configuration\n");
+    exit(EX_USAGE);
+  }
+  // Look for specified hardware section
+  {
+    int const nsect = iniparser_getnsec(Configtable);
+    int sect;
+    for(sect = 0; sect < nsect; sect++){
+      char const * const sname = iniparser_getsecname(Configtable,sect);
+      if(strcasecmp(sname,hardware) == 0){
+	if(setup_hardware(sname) != 0)
+	  exit(EX_NOINPUT);
+
+	break;
+      }
+    }
+    if(sect == nsect){
+      fprintf(stdout,"no hardware section [%s] found, please create it\n",hardware);
+      exit(EX_USAGE);
+    }
+  }
   FFTW_plan_timelimit = config_getdouble(Configtable,global,"fft-time-limit",FFTW_plan_timelimit);
   {
     char const *cp = config_getstring(Configtable,global,"fft-plan-level","patient");
@@ -403,24 +442,30 @@ static int loadconfig(char const *file){
   fcntl(Output_fd,F_SETFL,O_NONBLOCK); // Just drop instead of blocking real time
   // Set up default output stream file descriptor and socket
   // There can be multiple senders to an output stream, so let avahi suppress the duplicate addresses
+  char ttlmsg[100];
+  snprintf(ttlmsg,sizeof(ttlmsg),"TTL=%d",Mcast_ttl);
+  // Look quickly (2 tries max) to see if it's already in the DNS
+  bool global_use_dns = config_getboolean(Configtable,global,"dns",false);
+
   {
-    char ttlmsg[100];
-    snprintf(ttlmsg,sizeof(ttlmsg),"TTL=%d",Mcast_ttl);
+    uint32_t addr = 0;
+    if(!global_use_dns || resolve_mcast(Data,&Template.output.dest_socket,DEFAULT_RTP_PORT,NULL,0,2) != 0)
+      addr = make_maddr(Data);
 
     size_t slen = sizeof(Template.output.dest_socket);
-    uint32_t addr = make_maddr(Data);
-    avahi_start(Name,"_rtp._udp",DEFAULT_RTP_PORT,Data,addr,ttlmsg,&Template.output.dest_socket,&slen);
-    avahi_start(Name,"_opus._udp",DEFAULT_RTP_PORT,Data,addr,ttlmsg,&Template.output.dest_socket,&slen);
-#if 0
-    avahi_start(Name,"_ka9q-ctl._udp",DEFAULT_STAT_PORT,Data,addr,ttlmsg,&Template.status.dest_socket,&slen); // same length
-#else
-    {
-      struct sockaddr_in *sin = (struct sockaddr_in *)&Template.status.dest_socket;
-      sin->sin_family = AF_INET;
-      sin->sin_addr.s_addr = htonl(addr);
-      sin->sin_port = htons(DEFAULT_STAT_PORT);
-    }
-#endif
+    avahi_start(Frontend.description != NULL ? Frontend.description : Name,
+	      "_rtp._udp",
+	      DEFAULT_RTP_PORT,
+	      Data,
+	      addr,
+	      ttlmsg,
+	      addr != 0 ? &Template.output.dest_socket : NULL,
+	      addr != 0 ? &slen : NULL);
+
+    // Status sent to same group, different port
+    memcpy(&Template.status.dest_socket,&Template.output.dest_socket,sizeof(Template.status.dest_socket));
+    struct sockaddr_in *sin = (struct sockaddr_in *)&Template.status.dest_socket;
+    sin->sin_port = htons(DEFAULT_STAT_PORT);
   }
   join_group(Output_fd,(struct sockaddr *)&Template.output.dest_socket,Iface,Mcast_ttl,IP_tos); // Work around snooping switch problem
 
@@ -448,55 +493,37 @@ static int loadconfig(char const *file){
     if(p != NULL)
       Wisdom_file = strdup(p);
   }
-  const char *hardware = config_getstring(Configtable,global,"hardware",NULL);
-  if(hardware == NULL){
-    // 'hardware =' now required, no default
-    fprintf(stdout,"'hardware = [sectionname]' now required to specify front end configuration\n");
-    exit(EX_USAGE);
-  }
-  // Look for specified hardware section
-  {
-    int const nsect = iniparser_getnsec(Configtable);
-    int sect;
-    for(sect = 0; sect < nsect; sect++){
-      char const * const sname = iniparser_getsecname(Configtable,sect);
-      if(strcasecmp(sname,hardware) == 0){
-	if(setup_hardware(sname) != 0)
-	  exit(EX_NOINPUT);
-
-	break;
-      }
-    }
-    if(sect == nsect){
-      fprintf(stdout,"no hardware section [%s] found, please create it\n",hardware);
-      exit(EX_USAGE);
-    }
-  }
   // Set up status/command stream, global for all receiver channels
+  // Form default status dns name
+  char hostname[sysconf(_SC_HOST_NAME_MAX)];
+  gethostname(hostname,sizeof(hostname));
+  // Edit off .domain, .local, etc
   {
-    // Form default status dns name
-    char hostname[sysconf(_SC_HOST_NAME_MAX)];
-    gethostname(hostname,sizeof(hostname));
-    // Edit off .domain, .local, etc
     char *cp = strchr(hostname,'.');
     if(cp != NULL)
       *cp = '\0';
-    char default_status[strlen(hostname) + strlen(Name) + 20]; // Enough room for snprintf
-    snprintf(default_status,sizeof(default_status),"%s-%s.local",hostname,Name);
-    Metadata_dest_string = strdup(config_getstring(Configtable,global,"status",default_status)); // Status/command target for all demodulators
-    if(0 == strcmp(Metadata_dest_string,Data)){
-      fprintf(stdout,"Duplicate status/data stream names: data=%s, status=%s\n",Data,Metadata_dest_string);
-      exit(EX_USAGE);
-    }
   }
+  char default_status[strlen(hostname) + strlen(Name) + 20]; // Enough room for snprintf
+  snprintf(default_status,sizeof(default_status),"%s-%s.local",hostname,Name);
+  Metadata_dest_string = strdup(config_getstring(Configtable,global,"status",default_status)); // Status/command target for all demodulators
+  if(0 == strcmp(Metadata_dest_string,Data)){
+    fprintf(stdout,"Duplicate status/data stream names: data=%s, status=%s\n",Data,Metadata_dest_string);
+    exit(EX_USAGE);
+  }
+  // Look quickly (2 tries max) to see if it's already in the DNS
   {
-    char ttlmsg[100];
-    snprintf(ttlmsg,sizeof(ttlmsg),"TTL=%d",Mcast_ttl);
+    uint32_t addr = 0;
+    if(!global_use_dns || resolve_mcast(Metadata_dest_string,&Metadata_dest_socket,DEFAULT_STAT_PORT,NULL,0,2) != 0)
+      addr = make_maddr(Metadata_dest_string);
+
+    // If dns name already exists in the DNS, advertise the service record but not an address record
     size_t slen = sizeof(Metadata_dest_socket);
-    uint32_t addr = make_maddr(Metadata_dest_string);
-    avahi_start(Frontend.description != NULL ? Frontend.description : Name,"_ka9q-ctl._udp",DEFAULT_STAT_PORT,Metadata_dest_string,addr,ttlmsg,&Metadata_dest_socket,&slen);
+    avahi_start(Frontend.description != NULL ? Frontend.description : Name,"_ka9q-ctl._udp",DEFAULT_STAT_PORT,
+		Metadata_dest_string,addr,ttlmsg,
+		addr != 0 ? &Metadata_dest_socket : NULL,
+		addr != 0 ? &slen : NULL);
   }
-  // avahi_start has resolved the target DNS name into Metadata_dest_socket and inserted the port number
+  // either resolve_mcast() or avahi_start() has resolved the target DNS name into Metadata_dest_socket and inserted the port number
   join_group(Output_fd,(struct sockaddr *)&Metadata_dest_socket,Iface,Mcast_ttl,IP_tos);
   // Same remote socket as status
   Ctl_fd = listen_mcast(&Metadata_dest_socket,Iface);
@@ -526,6 +553,8 @@ static int loadconfig(char const *file){
 
     if(strcasecmp(sname,global) == 0)
       continue; // Already processed above
+    if(strcasecmp(sname,hardware) == 0)
+      continue; // Already processed as a hardware section (possibly without device=)
     if(config_getstring(Configtable,sname,"device",NULL) != NULL)
       continue; // It's a front end configuration, ignore
 
@@ -551,31 +580,31 @@ static int loadconfig(char const *file){
     // Now also used for per-channel status/control, with different port number
     struct sockaddr_storage data_dest_socket;
     struct sockaddr_storage metadata_dest_socket;
+    memset(&data_dest_socket,0,sizeof(data_dest_socket));
+    memset(&metadata_dest_socket,0,sizeof(metadata_dest_socket));
 
     // There can be multiple senders to an output stream, so let avahi suppress the duplicate addresses
     {
-      char ttlmsg[100];
-      snprintf(ttlmsg,sizeof(ttlmsg),"TTL=%d",Mcast_ttl);
+      // Look quickly (2 tries max) to see if it's already in the DNS. Otherwise make a multicast address.
+      uint32_t addr = 0;
+      bool use_dns = config_getboolean(Configtable,sname,"dns",global_use_dns);
+      if(!use_dns || resolve_mcast(data,&data_dest_socket,DEFAULT_RTP_PORT,NULL,0,2) != 0)
+	// Hash name string to make IP multicast address in 239.x.x.x range
+	addr = make_maddr(data);
 
+      char const *cp = config_getstring(Configtable,sname,"encoding","s16be");
+      bool is_opus = strcasecmp(cp,"opus") == 0 ? true : false;
       size_t slen = sizeof(data_dest_socket);
-      uint32_t addr = make_maddr(data);
-
-      // Start only one depending on chan->output.encoding
-      char const *cp = config_getstring(Configtable,sname,"encoding",NULL);
-      if(cp != NULL && strcasecmp(cp,"opus") == 0)
-	avahi_start(sname,"_opus._udp",DEFAULT_RTP_PORT,data,addr,ttlmsg,&data_dest_socket,&slen);
-      else
-	avahi_start(sname,"_rtp._udp",DEFAULT_RTP_PORT,data,addr,ttlmsg,&data_dest_socket,&slen);
-#if 0
-      avahi_start(sname,"_ka9q-ctl._udp",DEFAULT_STAT_PORT,data,addr,ttlmsg,&metadata_dest_socket,&slen); // sockets are same size
-#else
-      {
-	struct sockaddr_in *sin = (struct sockaddr_in *)&metadata_dest_socket;
-	sin->sin_family = AF_INET;
-	sin->sin_addr.s_addr = htonl(addr);
-	sin->sin_port = htons(DEFAULT_STAT_PORT);
-      }
-#endif
+      avahi_start(sname,
+		  is_opus ? "_opus._udp" : "_rtp._udp",
+		  DEFAULT_RTP_PORT,
+		  data,addr,ttlmsg,
+		  addr != 0 ? &data_dest_socket : NULL,
+		  addr != 0 ? &slen : NULL);
+      // metadata for this stream is same except for port number
+      memcpy(&metadata_dest_socket,&data_dest_socket,sizeof(metadata_dest_socket));
+      struct sockaddr_in *sin = (struct sockaddr_in *)&metadata_dest_socket;
+      sin->sin_port = htons(DEFAULT_STAT_PORT);
     }
     join_group(Output_fd,(struct sockaddr *)&data_dest_socket,iface,Mcast_ttl,ip_tos);
     // No need to also join group for status socket, since the IP addresses are the same
@@ -707,11 +736,9 @@ static int loadconfig(char const *file){
 
 // Set up a local front end device
 static int setup_hardware(char const *sname){
-  char const *device = config_getstring(Configtable,sname,"device",NULL);
-  if(device == NULL){
-    fprintf(stdout,"No device= entry in [%s]\n",sname);
-    return -1;
-  }
+  if(sname == NULL)
+   return -1; // Possible?
+  char const *device = config_getstring(Configtable,sname,"device",sname);
   // Do we support it?
   // This should go into a table somewhere
 #ifndef FORCE_DYNAMIC
@@ -741,25 +768,31 @@ static int setup_hardware(char const *sname){
     Frontend.setup = sig_gen_setup;
     Frontend.start = sig_gen_startup;
     Frontend.tune = sig_gen_tune;
-    // The sdrplay library is still proprietary and object-only, so I can't bundle it in ka9q-radio
-    // Everything else either has a standard Debian package or I have information to program them directly.
-    // To hell with vendors who deliberately make their products hard to use when they have plenty of competition.
-  #ifdef SDRPLAY
-  } else if(strcasecmp(device,"sdrplay") == 0){
-    Frontend.setup = sdrplay_setup;
-    Frontend.start = sdrplay_startup;
-    Frontend.tune = sdrplay_tune;
-  #endif
+
+    /* SDRPlay is now a dynamically loaded module.
+       1. Install the API package (I used https://github.com/srcejon/sdrplayapi)
+          Note this will also install a strange half-megabyte daemon in /etc/systemd/system/
+	  I have no idea what it does, but it burns up much more CPU than all of ka9q-radio
+       2. run "make SDRPLAY=1" to build and install the sdrplay.so module so radiod can load it
+
+       It's not built by default because the compile will fail unless the API package is installed,
+       and it's just too much hassle for people who don't have an SDRPlay anyway
+       The sdrplay library is still proprietary and object-only, so I can't bundle it in ka9q-radio
+       Everything else either has a standard Debian package or I have information to program them directly.
+       To hell with vendors who deliberately make their products hard to use when they have plenty of competition.
+    */
   } else
 #endif
   {
     // Try to find it dynamically
-    char const *dlname = config_getstring(Configtable,device,"library",NULL);
+    char defname[PATH_MAX];
+    snprintf(defname,sizeof(defname),"%s/%s.so",SODIR,device);
+    char const *dlname = config_getstring(Configtable,device,"library",defname);
     if(dlname == NULL){
-      fprintf(stdout,"No dynamic library= entry found in [%s], device unrecognized\n",device);
+      fprintf(stdout,"No dynamic library specified for device %s\n",device);
       return -1;
     }
-    fprintf(stdout,"Dynamically loading SDR hardware driver %s\n",dlname);
+    fprintf(stdout,"Dynamically loading %s hardware driver from %s\n",device,dlname);
     char *error;
     Dl_handle = dlopen(dlname,RTLD_GLOBAL|RTLD_NOW);
     if(Dl_handle == NULL){
