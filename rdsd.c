@@ -73,6 +73,7 @@ static char const *Name = "rds";
 static struct session *Audio;
 static pthread_mutex_t Audio_protect = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t Output_packets;
+static pthread_t Input_thread;
 
 void closedown(int);
 struct session *lookup_session(const struct sockaddr *,uint32_t);
@@ -135,6 +136,7 @@ int main(int argc,char * const argv[]){
       break;
     default:
       fprintf(stderr,"Usage: %s [-v] [-T mcast_ttl] -I input_mcast_address -R output_mcast_address\n",argv[0]);
+      ASSERT_UNLOCKED(&Audio_protect);
       pthread_mutex_destroy(&Audio_protect);
       exit(1);
     }
@@ -154,6 +156,7 @@ int main(int argc,char * const argv[]){
     Status_fd = listen_mcast(&Status_dest_address,iface);
     if(Status_fd == -1){
       fprintf(stderr,"Can't set up input on %s: %s\n",optarg,strerror(errno));
+      ASSERT_UNLOCKED(&Audio_protect);
       pthread_mutex_destroy(&Audio_protect);
       exit(1);
     }
@@ -190,19 +193,20 @@ int main(int argc,char * const argv[]){
   // Set up multicast
   if(Input_fd == -1 && Status_fd == -1){
     fprintf(stderr,"Must specify either --status-in or --pcm-in\n");
+    ASSERT_UNLOCKED(&Audio_protect);
     pthread_mutex_destroy(&Audio_protect);
     exit(1);
   }
   if(Output_fd == -1){
     fprintf(stderr,"Must specify --opus-out\n");
+    ASSERT_UNLOCKED(&Audio_protect);
     pthread_mutex_destroy(&Audio_protect);
     exit(1);
   }
 
   // Set up to receive PCM in RTP/UDP/IP
-  pthread_t input_thread;
   if(Input_fd != -1)
-    pthread_create(&input_thread,NULL,input,NULL);
+    pthread_create(&Input_thread,NULL,input,NULL);
 
   // Graceful signal catch
   signal(SIGPIPE,closedown);
@@ -260,7 +264,7 @@ int main(int argc,char * const argv[]){
 
 	    Input_fd = listen_mcast(&PCM_dest_address,NULL);
 	    if(Input_fd != -1)
-	      pthread_create(&input_thread,NULL,input,cp);
+	      pthread_create(&Input_thread,NULL,input,cp);
 	  }
 	  break;
 	default:  // Ignore all others for now
@@ -336,6 +340,7 @@ void *input(void *arg){
       sp->rtp_state_in.timestamp = pkt->rtp.timestamp;
 
       // Span per-SSRC thread
+      ASSERT_ZEROED(&sp->thread,sizeof sp->thread);
       if(pthread_create(&sp->thread,NULL,decode,sp) == -1){
 	perror("pthread_create");
 	close_session(sp);
@@ -568,6 +573,7 @@ int close_session(struct session *sp){
     sp->queue = pkt;
   }
   pthread_mutex_unlock(&sp->qmutex);
+  ASSERT_UNLOCKED(&sp->qmutex);
   pthread_mutex_destroy(&sp->qmutex);
   pthread_cond_destroy(&sp->qcond);
   
@@ -596,6 +602,7 @@ void closedown(int s){
   pthread_mutex_unlock(&Audio_protect);
 #endif
 
+  ASSERT_UNLOCKED(&Audio_protect);
   pthread_mutex_destroy(&Audio_protect);
   exit(0);
 }

@@ -18,6 +18,7 @@
 #include <math.h> // Get M_PI
 #include <stdlib.h> // for ldiv(), free()
 #include <stdbool.h>
+#include <sys/errno.h>
 #ifdef __linux__
 #include <bsd/string.h>
 #endif
@@ -28,6 +29,17 @@
 		    fprintf(stdout,"Copyright 2025, Phil Karn, KA9Q. May be used under the terms of the GNU Public License\n");}
 
 
+#define ASSERT_ZEROED(ptr, size) assert(memcmp(ptr, &(typeof(*(ptr))){0}, size) == 0)
+
+static inline void ASSERT_UNLOCKED(pthread_mutex_t *mutex){
+#ifndef NDEBUG
+  int rc = pthread_mutex_trylock(mutex);
+  assert(rc != EBUSY);
+  pthread_mutex_unlock(mutex);
+#else
+  (void)mutex;
+#endif
+}
 // 16-bit floating point is not consistent across platforms
 #ifdef __arm__  // ARM platform
   #if defined(__ARM_FP16_FORMAT_IEEE)

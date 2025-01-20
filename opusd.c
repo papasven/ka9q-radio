@@ -354,6 +354,7 @@ int main(int argc,char * const argv[]){
 	sp->channels = channels;
 
 	// Span per-SSRC thread, each with its own instance of opus encoder
+	ASSERT_ZEROED(&sp->thread,sizeof sp->thread);
 	if(pthread_create(&sp->thread,NULL,encode,sp) == -1){
 	  perror("pthread_create");
 	  close_session(&sp);
@@ -575,6 +576,8 @@ int close_session(struct session ** p){
     sp->queue = pkt;
   }
   pthread_mutex_unlock(&sp->qmutex);
+
+  ASSERT_UNLOCKED(&sp->qmutex);
   pthread_mutex_destroy(&sp->qmutex);
 
   // Remove from linked list of sessions

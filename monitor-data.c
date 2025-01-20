@@ -128,6 +128,7 @@ void *dataproc(void *arg){
       sp->reset = true;
       sp->init = true;
 
+      ASSERT_ZEROED(&sp->task,sizeof sp->task);
       if(pthread_create(&sp->task,NULL,decode_task,sp) == -1){
 	perror("pthread_create");
 	close_session(&sp);
@@ -182,6 +183,7 @@ void decode_task_cleanup(void *arg){
   struct session *sp = (struct session *)arg;
   assert(sp);
 
+  ASSERT_UNLOCKED(&sp->qmutex);
   pthread_mutex_destroy(&sp->qmutex);
   pthread_cond_destroy(&sp->qcond);
 
