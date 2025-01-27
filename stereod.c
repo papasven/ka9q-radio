@@ -23,6 +23,7 @@
 
 #include "misc.h"
 #include "multicast.h"
+#include "rtp.h"
 #include "status.h"
 #include "filter.h"
 #include "iir.h"
@@ -77,6 +78,7 @@ int Status_fd = -1;           // Reading from radio status
 int Status_out_fd = -1;       // Writing to radio status
 int Input_fd = -1;            // Multicast receive socket
 int Output_fd = -1;           // Multicast send socket
+int Output_fd_lo = -1;           // Multicast send socket
 struct session *Audio;
 pthread_mutex_t Audio_protect = PTHREAD_MUTEX_INITIALIZER;
 uint64_t Output_packets;
@@ -109,12 +111,12 @@ struct option Options[] =
    
 char Optstring[] = "A:I:N:R:S:T:vp:";
 
-struct sockaddr_storage Status_dest_address;
-struct sockaddr_storage Status_input_source_address;
-struct sockaddr_storage Local_status_source_address;
-struct sockaddr_storage PCM_dest_address;
-struct sockaddr_storage Stereo_source_address;
-struct sockaddr_storage Stereo_dest_address;
+struct sockaddr Status_dest_address;
+struct sockaddr Status_input_source_address;
+struct sockaddr Local_status_source_address;
+struct sockaddr PCM_dest_address;
+struct sockaddr Stereo_source_address;
+struct sockaddr Stereo_dest_address;
 
 int main(int argc,char * const argv[]){
   App_path = argv[0];
@@ -194,8 +196,8 @@ int main(int argc,char * const argv[]){
     uint32_t addr = make_maddr(Output);
     avahi_start(service_name,"_rtp._udp",DEFAULT_RTP_PORT,Output,addr,description,NULL,NULL);
     resolve_mcast(Output,&Stereo_dest_address,DEFAULT_RTP_PORT,NULL,0,0);
-    Output_fd = connect_mcast(&Stereo_dest_address,NULL,Mcast_ttl,IP_tos);
-    if(Output_fd == -1){
+    Output_fd = output_mcast(&Stereo_dest_address,NULL,Mcast_ttl,IP_tos);
+    if(Output_fd < 0){
       fprintf(stderr,"Can't set up output on %s: %s\n",Output,strerror(errno));
       exit(EX_IOERR);
     }
@@ -231,7 +233,7 @@ int main(int argc,char * const argv[]){
     pkt->data = NULL;
     pkt->len = 0;
     
-    struct sockaddr_storage sender;
+    struct sockaddr sender;
     socklen_t socksize = sizeof(sender);
     int size = recvfrom(Input_fd,&pkt->content,sizeof(pkt->content),0,(struct sockaddr *)&sender,&socksize);
     
@@ -511,8 +513,7 @@ void *decode(void *arg){
 	*wp++ = htons(scaleclip(right));
       }
       dp = (uint8_t *)wp;
-      int const r = send(Output_fd,&packet,dp - packet,0);
-      if(r <= 0){
+      if(sendto(Output_fd,&packet,dp - packet,0,&Stereo_dest_address,sizeof Stereo_dest_address) < 0){
 	fprintf(stderr,"pcm send: %s, ending thread\n",strerror(errno));
 	break;
       }

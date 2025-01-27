@@ -27,48 +27,55 @@ LIBDIR=/usr/local/share/ka9q-radio
 SODIR=/usr/local/lib/ka9q-radio
 DAEMONDIR=/usr/local/sbin
 VARDIR=/var/lib/ka9q-radio
-LDLIBS=-ldl -lavahi-client -lavahi-common -lfftw3f_threads -lfftw3f -liniparser -lairspy -lairspyhf -lrtlsdr -lsamplerate -lopus -logg -lportaudio -lasound -lusb-1.0 -lncurses -lbsd -lm -lpthread
+LDLIBS=-ldl -lavahi-client -lavahi-common -lfftw3f_threads -lfftw3f -liniparser -lairspy -lairspyhf -lrtlsdr -lopus -logg -lportaudio -lasound -lusb-1.0 -lncurses -lbsd -lm -lpthread
 
 DAEMONS=aprs aprsfeed cwd opusd packetd radiod stereod rdsd
 
 EXECS=control jt-decoded metadump monitor opussend pcmcat pcmrecord pcmsend pcmspawn pl powers setfilt show-pkt show-sig tune wd-record
 
+SCRIPTS=set_lo_multicast.sh
+
 RADIOD_OBJECTS = main.o audio.o fm.o wfm.o linear.o spectrum.o radio.o radio_status.o rtcp.o rx888.o airspy.o airspyhf.o funcube.o rtlsdr.o sig_gen.o ezusb.o fcd.o hid-libusb.o libradio.a
 
 DYNAMIC_RADIOD_OBJECTS = main.o audio.o fm.o wfm.o linear.o spectrum.o radio.o radio_status.o rtcp.o libradio.a
-
-# Build on raspberry pi only
-HEADER_FILE = $(wildcard /usr/include/pigpio.h)
-
-ifeq ($(HEADER_FILE),)
-else
-	EXECS += set_xcvr
-endif
-
 
 LOGROTATE_FILES = aprsfeed.rotate ft8.rotate ft4.rotate wspr.rotate hfdl.rotate
 
 BLACKLIST=airspy-blacklist.conf
 
-CFILES = airspy.c airspyhf.c aprs.c aprsfeed.c attr.c audio.c avahi.c avahi_browse.c ax25.c bandplan.c config.c control.c cwd.c decimate.c decode_status.c dump.c ezusb.c fcd.c filter.c fm.c funcube.c hid-libusb.c iir.c jt-decoded.c linear.c main.c metadump.c misc.c modes.c monitor.c monitor-data.c monitor-display.c monitor-repeater.c morse.c multicast.c opusd.c opussend.c osc.c packetd.c pcmcat.c pcmrecord.c pcmsend.c pcmspawn.c pl.c powers.c radio.c radio_status.c rdsd.c rtcp.c rtlsdr.c rx888.c setfilt.c show-pkt.c show-sig.c sig_gen.c spectrum.c status.c stereod.c tune.c wd-record.c wfm.c
+CFILES = airspy.c airspyhf.c aprs.c aprsfeed.c attr.c audio.c avahi.c avahi_browse.c ax25.c bandplan.c config.c control.c cwd.c decimate.c decode_status.c dump.c ezusb.c fcd.c filter.c fm.c funcube.c hid-libusb.c iir.c jt-decoded.c linear.c main.c metadump.c misc.c modes.c monitor.c monitor-data.c monitor-display.c monitor-repeater.c morse.c multicast.c opusd.c opussend.c osc.c packetd.c pcmcat.c pcmrecord.c pcmsend.c pcmspawn.c pl.c powers.c radio.c radio_status.c rdsd.c rtcp.c rtlsdr.c rtp.c rx888.c setfilt.c show-pkt.c show-sig.c sig_gen.c spectrum.c status.c stereod.c tune.c wd-record.c wfm.c
 
 HFILES = attr.h ax25.h bandplan.h conf.h config.h decimate.h ezusb.h fcd.h fcdhidcmd.h filter.h hidapi.h iir.h misc.h monitor.h morse.h multicast.h osc.h radio.h rx888.h status.h
 
 DYNAMICS = rx888.so airspyhf.so airspy.so sig_gen.so funcube.so rtlsdr.so
 
+# Build if installed
+ifeq ($(wildcard /usr/local/include/sdrplay_api.h),)
+else
+SDRPLAY=1
+endif
 # If SDRPLAY is set, add the necessary flags, files, and libraries
 ifdef SDRPLAY
 CFILES := $(CFILES) sdrplay.c
 DYNAMICS += sdrplay.so
 endif
 
+# Build if installed
+ifeq ($(wildcard /usr/local/include/fobos.h),)
+else
+FOBOS=1
+endif
 # if FOBOS is set, build it too
 ifdef FOBOS
 CFILES := $(CFILES) fobos.c
 DYNAMICS += fobos.so
 endif
 
-
+# Build on raspberry pi only
+ifeq ($(wildcard /usr/include/pigpio.h),)
+else
+	EXECS += set_xcvr
+endif
 
 all: $(DAEMONS) $(EXECS) $(DYNAMICS)
 
@@ -76,23 +83,28 @@ all: $(DAEMONS) $(EXECS) $(DYNAMICS)
 install: $(DAEMONS) $(EXECS)
 	/usr/sbin/adduser --quiet --system --group radio
 	/usr/sbin/adduser --quiet --system --ingroup radio aprsfeed
-	rsync -a aux/98-sockbuf.conf /etc/sysctl.d
+	rsync -a aux/98-sockbuf.conf aux/50-multicast.conf /etc/sysctl.d
 	sysctl --quiet -p /etc/sysctl.d/98-sockbuf.conf
+	sysctl --quiet -p /etc/sysctl.d/50-multicast.conf
 	rsync -a $(DAEMONS) $(DAEMONDIR)
-	rsync -a $(EXECS) start-ka9q-horus.sh $(BINDIR)
+	rsync -a $(EXECS) $(SCRIPTS) $(BINDIR)
 	rsync -a $(DYNAMICS) $(SODIR)
 	ln -sf $(SODIR)/*.so /usr/local/lib
 	setcap cap_sys_nice=ep $(BINDIR)/monitor
+	setcap cap_net_admin,cap_sys_nice=ep $(DAEMONDIR)/radiod
 	(cd share;rsync -a --ignore-existing . $(LIBDIR))
 	(cd service;rsync -a . /etc/systemd/system)
 	(cd rules;rsync -a . /etc/udev/rules.d)
 	(cd aux;rsync -a $(BLACKLIST) /etc/modprobe.d)
 	(cd aux;rsync -a $(LOGROTATE_FILES) /etc/logrotate.d;chown root:root /etc/logrotate.d/*;chmod go-w /etc/logrotate.d/*)
-	touch -a /var/log/ft8.log /var/log/ft4.log /var/log/wspr.log
-	mkdir -p /etc/fftw /etc/radio $(VARDIR) $(VARDIR)/ft8 $(VARDIR)/ft4 $(VARDIR)/wspr /var/lib/hfdl /var/log/hfdl
+	touch -a /etc/avahi/hosts /var/log/ft8.log /var/log/ft4.log /var/log/wspr.log
+	mkdir -p /etc/fftw /etc/radio /etc/avahi/services $(VARDIR) $(VARDIR)/ft8 $(VARDIR)/ft4 $(VARDIR)/wspr /var/lib/hfdl /var/log/hfdl
 	chown radio:radio /var/log/ft8.log /var/log/ft4.log /var/log/wspr.log /var/log/hfdl /var/log/hfdl
-	chgrp radio /etc/radio /etc/fftw $(VARDIR) $(VARDIR)/ft8 $(VARDIR)/ft4 $(VARDIR)/wspr /var/lib/hfdl /var/log/hfdl
-	chmod g+ws  /etc/radio /etc/fftw $(VARDIR) $(VARDIR)/ft8 $(VARDIR)/ft4 $(VARDIR)/wspr /var/lib/hfdl /var/log/hfdl
+	chgrp radio /etc/radio /etc/fftw /etc/avahi/hosts /etc/avahi/services $(VARDIR) $(VARDIR)/ft8 $(VARDIR)/ft4 $(VARDIR)/wspr /var/lib/hfdl /var/log/hfdl
+	chmod g+ws  /etc/radio /etc/fftw /etc/avahi/hosts /etc/avahi/services $(VARDIR) $(VARDIR)/ft8 $(VARDIR)/ft4 $(VARDIR)/wspr /var/lib/hfdl /var/log/hfdl
+# now handled by radiod with cap_net_admin capability
+#	systemctl enable set_lo_multicast
+#	systemctl start set_lo_multicast
 	systemctl daemon-reload
 
 clean:
@@ -102,7 +114,9 @@ DEPS = $(CFILES:.c=.d)
 
 -include $(DEPS)
 
-.PHONY: clean all install pi
+.PHONY: clean all install pi dynamics
+
+dynamics: $(DYNAMICS)
 
 # Executables
 
@@ -134,7 +148,7 @@ metadump: metadump.o libradio.a
 	$(CC) $(LDOPTS) -o $@ $^ $(LDLIBS)
 
 monitor: monitor.o monitor-data.o monitor-display.o monitor-repeater.o libradio.a
-	$(CC) $(LDOPTS) -o $@ $^ $(LDLIBS)
+	$(CC) $(LDOPTS) -o $@ $^ -lsamplerate $(LDLIBS)
 
 opusd: opusd.o libradio.a
 	$(CC) $(LDOPTS) -o $@ $^ $(LDLIBS)
@@ -248,7 +262,7 @@ fobos-pic.o: fobos.c
 
 
 # subroutines useful in more than one program
-libradio.a: ax25.o morse.o bandplan.o dump.o modes.o avahi.o avahi_browse.o attr.o filter.o iir.o decode_status.o status.o misc.o multicast.o osc.o config.o
+libradio.a: ax25.o morse.o bandplan.o dump.o modes.o avahi.o avahi_browse.o attr.o filter.o iir.o decode_status.o status.o misc.o multicast.o rtp.o osc.o config.o
 	ar rv $@ $?
 	ranlib $@
 

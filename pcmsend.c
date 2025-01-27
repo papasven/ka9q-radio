@@ -22,6 +22,7 @@
 
 #include "misc.h"
 #include "multicast.h"
+#include "rtp.h"
 
 // Global config constants
 #define BUFFERSIZE (1<<18)    // Size of audio ring buffer in mono samples. 2^18 is 2.73 sec at 48 kHz stereo
@@ -42,6 +43,7 @@ int IP_tos = 48; // AF12 << 2
 
 // Global vars
 int Output_fd = -1;
+int Output_fd_lo = -1;
 float Audiodata[BUFFERSIZE];
 int Samples_available;
 int Wptr;   // Write pointer for callback
@@ -104,7 +106,7 @@ int main(int argc,char * const argv[]){
   if(r != paNoError){
     fprintf(stderr,"Portaudio error: %s\n",Pa_GetErrorText(r));
     close(Output_fd);
-    return r;
+    exit(EX_IOERR);
   }
   atexit(cleanup);
 
@@ -140,7 +142,7 @@ int main(int argc,char * const argv[]){
   }
   if(inDevNum == paNoDevice){
     fprintf(stderr,"Portaudio: no available devices\n");
-    return -1;
+    exit(EX_IOERR);
   }
 
 
@@ -163,19 +165,18 @@ int main(int argc,char * const argv[]){
 
   if(r != paNoError){
     fprintf(stderr,"Portaudio error: %s\n",Pa_GetErrorText(r));      
-    close(Output_fd);
     exit(EX_IOERR);
   }
   r = Pa_StartStream(Pa_Stream);
   if(r != paNoError){
     fprintf(stderr,"Portaudio error: %s\n",Pa_GetErrorText(r));
-    close(Output_fd);
     exit(EX_IOERR);
   }
 
 
   // Set up multicast transmit socket
-  Output_fd = setup_mcast(Mcast_output_address_text,NULL,1,Mcast_ttl,IP_tos,0,0);
+  struct sockaddr sock;
+  Output_fd = setup_mcast(Mcast_output_address_text,&sock,1,Mcast_ttl,IP_tos,0,0);
   if(Output_fd == -1){
     fprintf(stderr,"Can't set up output on %s: %s\n",Mcast_output_address_text,strerror(errno));
     exit(EX_IOERR);
@@ -235,7 +236,7 @@ int main(int argc,char * const argv[]){
       rptr &= (BUFFERSIZE-1);
     }
     dp += Channels * FRAMESIZE * sizeof(*samples);
-    send(Output_fd,buffer,dp - buffer,0); // should probably check return code
+    sendto(Output_fd,buffer,dp - buffer,0,&sock, sizeof sock); // should probably check return code
     rtp_state_out.packets++;
     rtp_state_out.bytes += Channels * FRAMESIZE * sizeof(int16_t);
     rtp_state_out.seq++;

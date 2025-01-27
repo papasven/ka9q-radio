@@ -20,6 +20,7 @@
 
 #include "misc.h"
 #include "multicast.h"
+#include "rtp.h"
 #include "morse.h"
 
 int const Samprate = 48000; // Too hard to change
@@ -38,6 +39,7 @@ char const *Target = NULL;
 #define SCALE16 (1./INT16_MAX)
 int Dit_length;
 
+// Redo for loopback?
 int send_cw(int sock, struct rtp_state *rtp_state, wint_t c){
   // Should be longer than any character
   float fsamples[60 * Dit_length];

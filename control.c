@@ -52,8 +52,8 @@ static char Locale[256] = "en_US.UTF-8";
 static char const *Presets_file = "presets.conf"; // make configurable!
 static dictionary *Pdict;
 struct frontend Frontend;
-struct sockaddr_storage Metadata_source_socket;      // Source of metadata
-struct sockaddr_storage Metadata_dest_socket;      // Dest of metadata (typically multicast)
+struct sockaddr Metadata_source_socket;      // Source of metadata
+struct sockaddr Metadata_dest_socket;      // Dest of metadata (typically multicast)
 
 int Mcast_ttl = DEFAULT_MCAST_TTL;
 int IP_tos = DEFAULT_IP_TOS;
@@ -380,12 +380,6 @@ int main(int argc,char *argv[]){
   setlocale(LC_ALL,Locale); // Set either the hardwired default or the value of $LANG if it exists
   char const *target = argc > optind ? argv[optind] : NULL;
 
-  Output_fd = socket(AF_INET,SOCK_DGRAM,0); // Eventually intended for all output with sendto()
-  if(Output_fd < 0){
-    fprintf(stdout,"can't create output socket: %s\n",strerror(errno));
-    exit(EX_OSERR); // let systemd restart us
-  }
-  fcntl(Output_fd,F_SETFL,O_NONBLOCK); // Just drop instead of blocking real time
 
   if(target == NULL){
     // Use avahi browser to find a radiod instance to control
@@ -439,17 +433,22 @@ int main(int argc,char *argv[]){
     memcpy(&Metadata_dest_socket,results->ai_addr,sizeof(Metadata_dest_socket));
     freeaddrinfo(results); results = NULL;
     Status_fd = listen_mcast(&Metadata_dest_socket,table[n].interface);
-    join_group(Output_fd,(struct sockaddr *)&Metadata_dest_socket,table[n].interface,Mcast_ttl,IP_tos);
+    Output_fd = output_mcast(&Metadata_dest_socket,NULL,Mcast_ttl,IP_tos);
+    join_group(Output_fd,&Metadata_dest_socket,table[n].interface);
   } else {
     // Use resolv_mcast to resolve a manually entered domain name, using default port and parsing possible interface
-    char iface[1024]; // Multicast interface
+    char iface[1024] = {0}; // Multicast interface string
     resolve_mcast(target,&Metadata_dest_socket,DEFAULT_STAT_PORT,iface,sizeof(iface),0);
     Status_fd = listen_mcast(&Metadata_dest_socket,iface);
-    join_group(Output_fd,(struct sockaddr *)&Metadata_dest_socket,iface,Mcast_ttl,IP_tos);
+    Output_fd = output_mcast(&Metadata_dest_socket,iface,Mcast_ttl,IP_tos);
   }
   if(Status_fd < 0){
     fprintf(stderr,"Can't listen to mcast status channel: %s\n",strerror(errno));
     exit(EX_IOERR);
+  }
+  if(Output_fd < 0){
+    fprintf(stdout,"can't create output socket: %s\n",strerror(errno));
+    exit(EX_OSERR); // let systemd restart us
   }
   {
     // All reads from the status channel will have a timeout
@@ -662,7 +661,7 @@ int main(int argc,char *argv[]){
       wprintw(Debug_win,"sent command len %d\n",command_len);
       screen_update_needed = true; // show local change right away
 #endif
-      if(sendto(Output_fd, cmdbuffer, command_len, 0, (struct sockaddr *)&Metadata_dest_socket,sizeof(struct sockaddr)) != command_len){
+      if(sendto(Output_fd, cmdbuffer, command_len, 0, &Metadata_dest_socket,sizeof Metadata_dest_socket) != command_len){
 	wprintw(Debug_win,"command send error: %s\n",strerror(errno));
 	screen_update_needed = true; // show local change right away
       }
@@ -1249,8 +1248,8 @@ static void display_info(WINDOW *w,int row,int col,struct channel const *channel
     return;
 
   struct bandplan const *bp_low,*bp_high;
-  bp_low = lookup_frequency(channel->tune.freq + channel->filter.min_IF);
-  bp_high = lookup_frequency(channel->tune.freq + channel->filter.max_IF);
+  bp_low = lookup_frequency(channel->tune.freq + channel->filter.min_IF + 1.0);
+  bp_high = lookup_frequency(channel->tune.freq + channel->filter.max_IF - 1.0);
   // Make sure entire receiver passband is in the band
   if(bp_low != NULL && bp_high != NULL){
     if(bp_low)
@@ -1479,6 +1478,7 @@ static void display_input(WINDOW *w,struct channel const *channel){
   pprintw(w,row++,col,"Status pkts","%'llu",channel->status.packets_out);
   pprintw(w,row++,col,"Control pkts","%'llu",channel->status.packets_in);
   pprintw(w,row++,col,"Blocks since last poll","%'llu",channel->status.blocks_since_poll);
+  pprintw(w,row++,col,"Send errors","%'llu",channel->output.errors);
   if(channel->options != 0)
     pprintw(w,row++,col,"Options","0x%llx",(unsigned long long)channel->options);
   box(w,0,0);
@@ -1669,7 +1669,7 @@ static int send_poll(int ssrc){
   encode_int(&bp,OUTPUT_SSRC,ssrc); // poll specific SSRC, or request ssrc list with ssrc = 0
   encode_eol(&bp);
   int const command_len = bp - cmdbuffer;
-  if(sendto(Output_fd, cmdbuffer, command_len, 0, (struct sockaddr *)&Metadata_dest_socket,sizeof(struct sockaddr)) != command_len)
+  if(sendto(Output_fd, cmdbuffer, command_len, 0, &Metadata_dest_socket,sizeof Metadata_dest_socket) != command_len)
     return -1;
 
   return 0;
