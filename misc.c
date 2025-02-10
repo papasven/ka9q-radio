@@ -23,6 +23,7 @@
 #include <sys/mman.h>
 #include <sched.h>
 #include <errno.h>
+#include <locale.h>
 
 #ifndef NULL
 #define NULL ((void *)0)
@@ -77,10 +78,17 @@ int pipefill(int const fd,void *buffer,int const cnt){
 // Set realtime priority (if possible)
 static int Base_prio;
 static bool Message_shown;
+
 void realtime(void){
 #ifdef __linux__
+  static int minprio = -1; // Save the extra system calls
+  static int maxprio = -1;
+  if(minprio == -1 || maxprio == -1){
+    minprio = sched_get_priority_min(SCHED_FIFO);
+    maxprio = sched_get_priority_max(SCHED_FIFO);
+  }
   struct sched_param param = {0};
-  param.sched_priority = (sched_get_priority_max(SCHED_FIFO) + sched_get_priority_min(SCHED_FIFO)) / 2; // midway?
+  param.sched_priority = (minprio + maxprio) / 2; // midway?
   if(sched_setscheduler(0,SCHED_FIFO|SCHED_RESET_ON_FORK,&param) == 0)
     return; // Successfully set realtime
 
@@ -336,19 +344,26 @@ double parse_frequency(char const *s,bool heuristics){
 
     ss[i] = '\0';
   }
+  // Don't hardwire the decimal point, use the current locale
+  char decimal = '.';
+  struct lconv *lc = localeconv();
+  if(lc != NULL && lc->decimal_point != NULL && strlen(lc->decimal_point) > 0)
+    decimal = lc->decimal_point[0];
+
   double mult = 1;
   // k, m or g in place of decimal point indicates scaling by 1k, 1M or 1G
   char *sp = NULL;
   if((sp = strchr(ss,'g')) != NULL){
     mult = 1e9;
-    *sp = '.';
+    *sp = decimal;
   } else if((sp = strchr(ss,'m')) != NULL){
     mult = 1e6;
-    *sp = '.';
+    *sp = decimal;
   } else if((sp = strchr(ss,'k')) != NULL){
     mult = 1e3;
-    *sp = '.';
-  } else if((sp = strchr(ss,'.')) != NULL){ // note explicit radix point
+    *sp = decimal;
+  } else if((sp = strchr(ss,decimal)) != NULL){
+    // Disable heuristic if explicitly given
   }
   char *endptr = NULL;
   double f = strtod(ss,&endptr);

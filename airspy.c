@@ -98,6 +98,7 @@ int airspy_setup(struct frontend * const frontend,dictionary * const Dictionary,
   assert(Dictionary != NULL);
 
   struct sdrstate * const sdr = calloc(1,sizeof(struct sdrstate));
+  assert(sdr != NULL);
   // Cross-link generic and hardware-specific control structures
   sdr->frontend = frontend;
   frontend->context = sdr;
@@ -262,11 +263,8 @@ int airspy_setup(struct frontend * const frontend,dictionary * const Dictionary,
   }
   {
     char const * const p = config_getstring(Dictionary,section,"description",NULL);
-    if(p != NULL){
-      FREE(frontend->description);
-      frontend->description = strdup(p);
-      fprintf(stdout,"%s: ",frontend->description);
-    }
+    if(p != NULL)
+      strlcpy(frontend->description,p,sizeof(frontend->description));
   }
   fprintf(stdout,"Software AGC %d; linearity %d, LNA AGC %d, Mix AGC %d, LNA gain %d, Mix gain %d, VGA gain %d, gainstep %d, bias tee %d\n",
 	  sdr->software_agc,sdr->linearity,lna_agc,mixer_agc,frontend->lna_gain,frontend->mixer_gain,frontend->if_gain,gainstep,sdr->antenna_bias);
@@ -394,14 +392,13 @@ static int rx_callback(airspy_transfer *transfer){
   frontend->samples += sampcount;
   frontend->timestamp = gps_time_ns();
   write_rfilter(&frontend->in,NULL,sampcount); // Update write pointer, invoke FFT
-  frontend->if_power_instant = (float)in_energy / sampcount;
-  frontend->if_power = Power_smooth * (frontend->if_power_instant - frontend->if_power);
+  frontend->if_power += Power_smooth * (in_energy / sampcount - frontend->if_power);
   if(sdr->software_agc){
     // Integrate A/D energy over A/D averaging period
     sdr->agc_energy += in_energy;
     sdr->agc_samples += sampcount;
     if(sdr->agc_samples >= frontend->samprate/10){ // Time to re-evaluate after 100 ms
-      float avg_agc_power = scale_ADpower2FS(sdr->frontend) * sdr->agc_energy / sdr->agc_samples;
+      float avg_agc_power = scale_ADpower2FS(frontend) * sdr->agc_energy / sdr->agc_samples;
       if(avg_agc_power < sdr->low_threshold){
 	if(Verbose)
 	  printf("AGC power %.1f dBFS\n",power2dB(avg_agc_power));

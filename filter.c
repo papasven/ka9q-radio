@@ -51,7 +51,7 @@ int FFTW_planning_level = FFTW_PATIENT;
 static pthread_mutex_t FFTW_planning_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool FFTW_init = false;
 
-// FFT job queue
+// FFT job descriptor
 struct fft_job {
   struct fft_job *next;
   unsigned int jobnum;
@@ -61,10 +61,11 @@ struct fft_job {
   void *output;
   pthread_mutex_t *completion_mutex; // protects completion_jobnum
   pthread_cond_t *completion_cond;   // Signaled when job is complete
-  int *completion_jobnum;   // Written with jobnum when complete
+  unsigned int *completion_jobnum;   // Written with jobnum when complete
   bool terminate; // set to tell fft thread to quit
 };
 
+static struct fft_job *FFT_free_list; // List of spare job descriptors
 
 #define NTHREADS_MAX 20  // More than I'll ever need
 static struct {
@@ -193,6 +194,10 @@ int create_filter_input(struct filter_in *master,int const L,int const M, enum f
     // Start FFT worker thread(s) if not already running
     pthread_mutex_init(&FFT.queue_mutex,NULL);
     pthread_cond_init(&FFT.queue_cond,NULL);
+    if(N_worker_threads > NTHREADS_MAX){
+      fprintf(stdout,"fft-threads=%d too high, limiting to %d\n",N_worker_threads,NTHREADS_MAX);
+      N_worker_threads = NTHREADS_MAX;
+    }
     for(int i=0;i < N_worker_threads;i++)
       pthread_create(&FFT.thread[i],NULL,run_fft,NULL);
 
@@ -421,7 +426,12 @@ void *run_fft(void *p){
     // Do NOT destroy job->completion_cond and completion_mutex here, they continue to exist
 
     bool const terminate = job->terminate; // Don't use job pointer after free
-    FREE(job);
+    // Put descriptor on free pool
+    pthread_mutex_lock(&FFT.queue_mutex);
+    job->next = FFT_free_list;
+    FFT_free_list = job;
+    pthread_mutex_unlock(&FFT.queue_mutex);
+
     if(terminate)
       break; // Terminate after this job
   }
@@ -468,9 +478,20 @@ int execute_filter_input(struct filter_in * const f){
     return 0;
   }
 
-
   // set up a job for the FFT worker threads and enqueue it
-  struct fft_job * const job = calloc(1,sizeof(struct fft_job));
+  // Take one off the pool, if available
+  pthread_mutex_lock(&FFT.queue_mutex);
+  struct fft_job *job = FFT_free_list;
+  if(job != NULL){
+    FFT_free_list = job->next;
+    job->next = NULL;
+  }
+  pthread_mutex_unlock(&FFT.queue_mutex);
+
+  if(job == NULL)
+    job = calloc(1,sizeof(struct fft_job)); // Otherwise create a new one
+
+  // A descriptor from the free list won't be blank, but we set everything below
   assert(job != NULL);
   job->jobnum = f->next_jobnum++;
   job->output = f->fdomain[job->jobnum % ND];
@@ -479,6 +500,7 @@ int execute_filter_input(struct filter_in * const f){
   job->completion_mutex = &f->filter_mutex;
   job->completion_jobnum = &f->completed_jobs[job->jobnum % ND];
   job->completion_cond = &f->filter_cond;
+  job->terminate = false;
 
   // Set up the job and next input buffer
   // We're assuming that the time-domain pointers we're passing to the FFT are always aligned the same
@@ -550,17 +572,23 @@ int execute_filter_output(struct filter_out * const slave,int const rotate){
 
   // Wait for new block of output data
   pthread_mutex_lock(&master->filter_mutex);
-  int blocks_to_wait = slave->next_jobnum - master->completed_jobs[slave->next_jobnum % ND];
-  if(blocks_to_wait <= -ND){
-    // Circular buffer overflow (for us)
-    slave->next_jobnum -= blocks_to_wait;
-    slave->block_drops -= blocks_to_wait;
+  int blocks_behind = master->completed_jobs[slave->next_jobnum % ND] - slave->next_jobnum;
+  if(blocks_behind >= ND){
+    // We've fallen too far behind. skip ahead to the oldest block still available
+    unsigned nextblock = master->completed_jobs[0];
+    for(int i=1; i < ND; i++){
+      if((int)(master->completed_jobs[i] - nextblock) < 0) // modular comparison
+	nextblock = master->completed_jobs[i];
+    }
+    slave->block_drops += nextblock - slave->next_jobnum;
+    slave->next_jobnum = nextblock;
   }
   while((int)(slave->next_jobnum - master->completed_jobs[slave->next_jobnum % ND]) > 0)
     pthread_cond_wait(&master->filter_cond,&master->filter_mutex);
   // We don't modify the master's output data, we create our own
   complex float const * const fdomain = master->fdomain[slave->next_jobnum % ND];
-  slave->next_jobnum++;
+  // in case we just waited so long that the buffer wrapped, resynch
+  slave->next_jobnum = master->completed_jobs[slave->next_jobnum % ND] + 1;
   pthread_mutex_unlock(&master->filter_mutex);
 
   assert(fdomain != NULL);
@@ -576,6 +604,74 @@ int execute_filter_output(struct filter_out * const slave,int const rotate){
   // (even for SSB) because of the fine tuning frequency shift after conversion
   // back to the time domain. So while real output is supported it is not well tested.
   if(master->in_type != REAL && slave->out_type != REAL){    // Complex -> complex
+#if 0 // needs more testing before it's the default
+    // Version written Feb 2025 to use memcpy/memset
+    int wp = slave->bins/2; // most negative output frequency
+    int remaining = slave->bins;
+    int zeropad = slave->bins/2 - (master->bins/2 + rotate);
+    // Leading padding -- usually unnecessary
+    while(zeropad > 0 && remaining > 0){
+      int chunk = min(zeropad,slave->bins/2); // No more than half
+      memset(&slave->fdomain[wp], 0, chunk * sizeof(complex float));
+      remaining -= chunk;
+      zeropad -= chunk;
+      wp += chunk;
+      if(wp == slave->bins/2) // top of output spectrum, entire output blanked
+	goto copy_done;
+      assert(wp <= slave->bins);
+      if(wp >= slave->bins)
+	wp -= slave->bins; // Wrap to positive output spectrum
+    }
+    int rp = rotate - (remaining - slave->bins/2);
+    if(rp < 0)
+      rp += master->bins;
+    assert(rp >= 0);
+    // The actual copies
+    // Usually takes two iterations, one each for negative and positive output spectrum
+    // Can take more if input straddles zero
+    while(remaining > 0){
+      int chunk = slave->bins/2 - wp;
+      if(chunk <= 0)
+	chunk += slave->bins/2;   // Negative output spectrum
+
+      int ichunk = master->bins/2 - rp;
+      if(ichunk <= 0)
+	ichunk += master->bins/2; // Negative input spectrum
+
+      chunk = min(chunk,ichunk);  // whichever size is smaller
+
+      // Array range checks
+      assert(wp >= 0 && chunk > 0 && chunk <= slave->bins  && wp + chunk <= slave->bins);
+      assert(rp >= 0 && rp + chunk <= master->bins);
+      memcpy(&slave->fdomain[wp],&fdomain[rp], chunk * sizeof(complex float));
+      wp += chunk;
+      remaining -= chunk;
+      assert(wp <= slave->bins);
+      if(wp >= slave->bins)
+	wp -= slave->bins;  // cross into positive
+      rp += chunk;
+      if(rp == master->bins/2)
+	break; // reached top of input spectrum, no more
+      assert(rp <= master->bins);
+      if(rp >= master->bins) // actually rp will equal master->bins
+	rp -= master->bins; // Crossing into positive input spectrum
+    }
+    // Trailing padding - usually unnecessary
+    if(remaining >= slave->bins/2){
+      // zero out remaining negative spectrum
+      int chunk = slave->bins - wp;
+      memset(&slave->fdomain[wp],0, chunk * sizeof(complex float));
+      remaining -= chunk;
+      wp = 0;
+    }
+    if(remaining > 0){
+      int chunk = slave->bins/2 - wp;
+      assert(chunk == remaining);
+      memset(&slave->fdomain[wp],0, chunk * sizeof(complex float));
+      remaining -= chunk;
+      assert(remaining == 0);
+    }
+#else
     // Rewritten to avoid modulo computations and complex branches inside loops
     int si = slave->bins/2;
     int mi = rotate - si;
@@ -613,6 +709,7 @@ int execute_filter_output(struct filter_out * const slave,int const rotate){
       if(si == slave->bins)
 	si = 0;
     }
+#endif
   } else if(master->in_type != REAL && slave->out_type == REAL){
     // Complex -> real UNTESTED!
     for(int si=0; si < slave->bins; si++){
@@ -639,8 +736,16 @@ int execute_filter_output(struct filter_out * const slave,int const rotate){
     // We don't allow the output to span the zero input frequency range as this doesn't seem useful
     // The most common case is that m is entirely in range and always < 0 or > 0
     if(rotate >= slave->bins/2 && rotate <= master->bins - slave->bins/2){
-      // Positive input spectrum
-      // Negative half of output
+      // Negative output spectrum, then positive
+#if 1
+      // Redone with memcpy Feb 2025
+      memcpy(&slave->fdomain[slave->bins/2],
+	     &fdomain[rotate - slave->bins/2],
+	     slave->bins/2 * sizeof(complex float));
+      memcpy(&slave->fdomain[0],
+	     &fdomain[rotate],
+	     slave->bins/2 * sizeof(complex float));
+#else
       int mi = rotate - slave->bins/2;
       for(int si = slave->bins/2; si < slave->bins; si++)
 	slave->fdomain[si] = fdomain[mi++];
@@ -648,8 +753,11 @@ int execute_filter_output(struct filter_out * const slave,int const rotate){
       // Positive half of output
       for(int si = 0; si < slave->bins/2; si++)
 	slave->fdomain[si] = fdomain[mi++];
+#endif
     } else if(-rotate >= slave->bins/2 && -rotate <= master->bins - slave->bins/2){
       // Negative input spectrum
+      // Can't use memcpy here because spectrum has to be made upright
+      // by copying in opposite direction and with complex conjugate
       // Negative half of output
       int mi = -(rotate - slave->bins/2);
       for(int si = slave->bins/2; si < slave->bins; si++)

@@ -93,6 +93,7 @@ int funcube_setup(struct frontend * const frontend, dictionary * const dictionar
   config_validate_section(stdout,dictionary,section,Funcube_keys,NULL);
   // Cross-link generic and hardware-specific control structures
   struct sdrstate * const sdr = calloc(1,sizeof(*sdr));
+  assert(sdr != NULL);
   sdr->frontend = frontend;
   frontend->context = sdr;
 
@@ -110,8 +111,9 @@ int funcube_setup(struct frontend * const frontend, dictionary * const dictionar
   frontend->calibrate = config_getdouble(dictionary,section,"calibrate",0);
   {
     char const * const p = config_getstring(dictionary,section,"description","funcube dongle+");
-    FREE(frontend->description);
-    frontend->description = strdup(p);
+    if(p != NULL){
+      strlcpy(frontend->description,p,sizeof(frontend->description));
+    }
   }
   Pa_Initialize();
 
@@ -284,8 +286,7 @@ static void *proc_funcube(void *arg){
     write_cfilter(&frontend->in,NULL,Blocksize); // Update write pointer, invoke FFT
     frontend->samples += Blocksize;
     float const block_energy = i_energy + q_energy; // Normalize for complex pairs
-    frontend->if_power_instant = block_energy / Blocksize;
-    frontend->if_power += Power_smooth * (frontend->if_power_instant - frontend->if_power); // Average A/D output power per channel
+    frontend->if_power += Power_smooth * (block_energy / Blocksize - frontend->if_power); // Average A/D output power per channel
 
 #if 1
     // Get status timestamp from UNIX TOD clock -- but this might skew because of inexact sample rate

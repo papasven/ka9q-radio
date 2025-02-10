@@ -1,5 +1,5 @@
 Configuring Receiver Channels in *ka9q-radio*  
-Version 2.0 Jan 8, 2025, Phil Karn
+Version 2.1 Feb 2, 2025, Phil Karn
 =============================================
 
 (This is the third part of the *ka9q-radio* configuration guide.
@@ -15,7 +15,7 @@ Each section configures one or more channels with the same mode,
 output multicast stream and sample rate, differing only in frequency. What follows
 is a list of parameter settings with their default values:
 
-### mode = pm|npm|fm|nfm|wfm|am|cam|ame|iq|cwu|cwl|usb|lsb|dsb|amsq|wspr|spectrum
+### mode = pm | npm | fm | nfm | wfm | am | cam | ame | iq | cwu | cwl | usb | lsb | dsb | amsq | wspr | spectrum
 
 No default. Required unless specified in [global].
 
@@ -29,6 +29,11 @@ The *modes.conf* file covers the most common modes, but individual parameters ca
 overridden if desired. If you find yourself doing this a lot, you might
 add a new mode to */var/lib/ka9q-radio/modes.conf*. Be careful to back
 it up; it may be overwritten by the next "make install.
+
+### dns = no | yes (default no)
+
+Use the domain name system to resolve the name in the *data* parameter. See
+the discussion in [ka9q-radio.md](ka9q-radio.md).
 
 ### data = 
 
@@ -50,7 +55,7 @@ Parameters in *modes.conf*
 The parameters that may be set in *modes.conf* and selectively overridden
 in each receiver channel group are:
 
-### demod = linear|fm|wfm
+### demod = linear | fm | wfm
 
 Selects one of
 three demodulators built into *radiod*, distinct from the
@@ -64,7 +69,7 @@ broadcasting; it contains a multiplex decoder and always produces
 stereo output at a 48 kHz sample rate. (Note: a separate *stereod*
 daemon may be used to decode multiplexed stereo from the single
 channel composite baseband output of a regular FM demodulator with
-appropriate bandwidth and sample rates, but the WFM demodulator is
+appropriate bandwidth and sample rates, but the one built into the WFM demodulator is
 more convenient.)
 
 ### samprate =
@@ -89,15 +94,15 @@ need such a high sample rate. A future enhancement of *ka9q-radio* may
 lower the sample rate of the FM demodulator output to save network
 capacity.)
 
-*ka9q-radio* supports any output sample rate that is a multiple of the
-least common multiple of the FFT bin spacing and the frame rate. For a 20 ms
+*ka9q-radio* supports any output sample rate that is a common multiple of the
+FFT bin spacing and the frame rate. For a 20 ms
 frame, the frame rate is 50 Hz. For an overlap of 5 (i.e., 1/5 of each
 FFT block is old data and 4/5 is new), the FFT bin spacing is 40 Hz. Therefore
 the sample rate must be a multiple of 200 Hz.
 This covers all the usual standard sample rates except for 44.1 kHz, the
 sample rate of the compact disk.
 
-### channels = 1|2
+### channels = 1 | 2
 
 Set the number of output channels. Forced to 1 for FM modes, 2 for WFM
 (Wideband broadcast FM). In linear mode with envelope detection
@@ -212,20 +217,20 @@ the AGC on, this value only sets the initial value before the AGC
 operates. It should be chosen to avoid either loud momentary bursts (from being set too high) or
 excessive gain recovery time (from being set too low).
 
-### envelope = on|off
+### envelope = on | off
 
 Select the AM envelope detector
 (linear demodulator only). When 2 channels are selected, send the
 envelope detector to the right channel (see the discussion under
 **channels**). Linear only.
 
-### pll = on|off
+### pll = on | off
 
 Linear demodulator only. Enable the
 phase lock loop. When enabled, the PLL will try to track a carrier to
-a nominal frequency of 0 Hz.
+a nominal frequency of 0 Hz. This also enables the carrier squelch.
 
-### square = on|off
+### square = on | off
 
 Linear demodulator only. Enables the
 PLL with a squaring operation in the feedback path. Useful for DSB-SC
@@ -236,7 +241,7 @@ PLL with a squaring operation in the feedback path. Useful for DSB-SC
 Linear demodulator only. Sets the
 loop filter bandwidth of the PLL in Hz.
 
-### agc = on|off
+### agc = on | off
 
 Linear demodulator only. Enables automatic gain control (AGC).
 
@@ -258,7 +263,7 @@ America and South Korea. Other countries use 50 microseconds.
 
 Not applicable to the linear
 demodulator. Default: +12 dB (empirically chosen) for the FM
-demodulator, 0 db for the WFM demodulator. Applies the specified
+demodulator, 0 dB for the WFM demodulator. Applies the specified
 amount of gain to the signal after de-emphasis to maintain the same
 objective loudness as with de-emphasis
 off. Needed mainly for NBFM because its 300 Hz corner frequency is
@@ -266,16 +271,16 @@ below the nominal speech band. Not needed for WFM because the 75
 microsecond time constant corresponds to 2123 Hz, above most of the
 power in typical speech or music.
 
-### extend|threshold-extend = yes|no
+### extend | threshold-extend = yes | no
 
 FM only. Enable or disable an experimental FM threshold extension scheme to reduce the "popcorn" noise that happens just below what
 is conventionally called "full quieting". This can buy another 2-3 dB until the pops become too frequent to suppress.
 
-### tone|pl|ctcss = 0
+### tone | pl | ctcss = 0
 
 FM only. When non-zero, enable a tone squelch for the specified tone frequency (Hz). Otherwise carrier squelch is used
 
-### pacing = on|off
+### pacing = on | off
 
 When on, add a delay after each transmitted Ethernet data packet to help avoid overrunning switches or hosts with
 insufficient buffering. This is useful only at high bit rates where multiple packets need to be sent during each frame time.
@@ -285,11 +290,11 @@ to allow room for the RTP/UDP/IP headers. (The 1500 byte MTU excludes the 14-byt
 frame time) is 576 kb/s or 16-bit PCM at a 36 kHz sampling rate. Higher output rates (e.g., 48 kHz) require multiple packets be sent
 with each frame's data, and without **pacing** on they are sent back-to-back. See also the **buffer** option.
 
-### encoding = s16le|s16be|f16le|f32le|opus
+### encoding = s16le | s16be | f16le | f32le | opus
 
 Select an output encoding. All options except 'opus' are uncompressed
 PCM (pulse code modulation). The default is s16be, i.e., signed 16-bit
-linea PPM with big-endian byte order. This became an Internet
+linear PCM with big-endian byte order. This became an Internet
 convention well before little-endian machines took over the world, so
 programs like **pcmrecord** automatically convert this to s16le
 (signed 16-bit little endian).
@@ -335,8 +340,8 @@ is good enough for most applications. Note that status updates stop in FM
 when the squelch is closed.
 
 These updates carry the full state of the channel and are needed by
-programs such as **pcmrecord** and **monitor** to determine things
-like the sample rate and format of the data stream before it can be
+programs such as **pcmrecord** and **monitor** to determine
+the sample rate and format before it can be
 interpreted.
 
 ### buffer = 0
@@ -344,7 +349,7 @@ interpreted.
 Controls data output buffering. Allowable values are 0-4.
 
 The default of 0 means no buffering, i.e., at least one Ethernet
-output packet is sent during every ka9q-radio frame. When delay is not
+output packet is sent during every ka9q-radio frame (assuming any squelch is open). When delay is not
 critical, buffering can significantly reduce the packet output rate at
 lower sample rates or with the Opus codec.
 
@@ -353,7 +358,7 @@ buffered pending additional data. In Opus, 0 and 1 are basically the
 same: transmit one Opus packet every frame time. This is because the
 Opus codec only handles a specific set of sample rates and packet
 durations, and these match to the usual sample rates and frame times
-of ka9q-radio (this is not a coincidence). Opus is so effective that
+of ka9q-radio (this is not a coincidence). Opus compresses so effectively that
 it is essentially impossible to reach the Ethernet size limit with 4 x
 20 = 80 ms of audio, so this setting primarily sets the Opus frame
 duration and encoding delay.
@@ -367,14 +372,14 @@ bytes every 60 ms, cutting the packet rate to 1/3.  I recommend trying
 this out especially in non-delay-sensitive applications like
 WSPR/FT8/HFDL decoding, or when recording to files.
 
-Data will never be delayed when there's enough to send a full packet,
+Except for the **pacing** option, data is never delayed when there's enough to send a full packet,
 so the effect of buffering is minimal at higher PCM sample
 rates. Depending on the specific sample rate and format it still may
 help fully pack all Ethernet frames instead of sending sequences of
 full packets plus one partial fragment during each frame, still
 reducing the average packet rate.
 
-### disable = yes|no
+### disable = yes | no
 
 A section may be disabled without deleting it by setting "disable = yes"
 somewhere in the section.
@@ -420,13 +425,55 @@ the metadata (status) stream, and newer versions of **pcmrecord** and
 **monitor** now use this.
 
 
+### filter2 = 0-4 (default 0)
+
+Linear demodulator only. This is an ***experimental*** second filter
+after the primary channel filter that sharpens the frequency response
+at the expense of extra latency and a little extra CPU. The default
+setting disables the secondary filter.
+
+The duration of the primary filter impulse response, and thus its
+selectivity, is limited by the overlap in the big forward FFT; for the
+usual values of **blocktime = 20** and **overlap = 5**, this is 4
+milliseconds. With the relatively large values of **kaiser-beta**
+needed to keep sidelobes from strong adjacent signals from aliasing
+into the passband, the transition bandwidth is several FFT bins or
+about 100-150 Hz.
+
+This is good enough for most uses, but when more selectivity is needed
+(e.g., for weak signal CW operation) setting **filter2** to 1 through
+4 specifies how many receiver blocks are to be grouped and run through
+a second, longer filter for greater selectivity. The filter2 overlap
+is 2 (50%) so even with **filter2 = 1** the selectivity is
+improved by a factor of 10/4 = 2.5 at a small cost in
+additional CPU and latency. Larger values sharpen the filter even
+more primarily at the expense of latency; **filter2 = 4** provides
+an impulse response of 50% * 80 ms = 40 ms, ten times as
+sharp as the primary filter alone at the cost of 60 ms of
+additional latency.
+
+The secondary filter uses the same values of 
+**low**, **high** and **kaiser-beta** as the primary
+filter.
+
+Both **filter2** and **buffer** increase latency, but the latter doesn't
+change filtering. I.e., if you want to send fewer, larger output
+packets at low sample rates you might use **filter2** instead of **buffer**.
+
+This feature is experimental and subject to substantial change.
+
+
 The Dynamic Template
 --------------------
 
 A dynamic "template" is also set up to allow new channels to be
 created and deleted at run time, e.g., with the *control* command.
 This is automatic if default **data** and **mode** settings are
-present in the [global] section.
+present in the [global] section.  At present the outputs of all
+dynamically created channels go to the same multicast group, but it
+will probably be made settable over the command/status channel in the
+near future.
+
 
 
 

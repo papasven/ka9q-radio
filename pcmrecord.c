@@ -177,6 +177,9 @@ struct session {
   bool complete;
 };
 
+#define SIZE_LIMIT 1
+#define SESSION_CLOSE 2
+#define IDLE_TIMEOUT 3
 
 static float SubstantialFileTime = 0.2;  // Don't record bursts < 250 ms unless they're between two substantial segments
 static double FileLengthLimit = 0; // Length of file in seconds; 0 = unlimited
@@ -206,7 +209,7 @@ static void input_loop(void);
 static void cleanup(void);
 int session_file_init(struct session *sp,struct sockaddr const *sender);
 static int close_session(struct session **spp);
-static int close_file(struct session *sp);
+static int close_file(struct session *sp,char const *reason);
 static uint8_t *encodeTagString(uint8_t *out,size_t size,const char *string);
 static int start_ogg_opus_stream(struct session *sp);
 static int emit_ogg_opus_tags(struct session *sp);
@@ -405,7 +408,7 @@ static int emit_opus_silence(struct session * const sp,int samples){
 
   if(Verbose > 1)
     fprintf(stderr,"%d: emitting %d frames of silence\n",sp->ssrc,samples);
-  ogg_packet oggPacket;
+  ogg_packet oggPacket = {0}; // Not really necessary
   oggPacket.b_o_s = 0;
   oggPacket.e_o_s = 0;    // End of stream flag
 
@@ -452,12 +455,11 @@ static int emit_opus_silence(struct session * const sp,int samples){
       sp->samples_remaining -= chunk;
     samples -= chunk;
     samples_since_flush += chunk;
-    if(Flushmode || samples_since_flush >= OPUS_SAMPRATE){
-      // Write an Ogg page on every packet to minimize latency
-      // Or at least once per second to keep opusinfo from complaining, and vlc progress from sticking
-      samples_since_flush = 0;
-      ogg_flush(sp);
-    }
+  }
+  if(Flushmode || samples_since_flush >= OPUS_SAMPRATE){
+    // Write at least once per second to keep opusinfo from complaining, and vlc progress from sticking
+    samples_since_flush = 0;
+    ogg_flush(sp);
   }
   return 0;
 }
@@ -484,10 +486,8 @@ static int send_opus_queue(struct session * const sp,bool flush){
       break; // Stop on first empty entry if we're not resynchronizing
 
     if(qp->inuse){
-      ogg_packet oggPacket;
-      oggPacket.b_o_s = 0;
-      oggPacket.e_o_s = 0;    // End of stream flag
-      int samples = opus_packet_get_nb_samples(qp->data,qp->size,48000); // Number of 48 kHz samples
+      ogg_packet oggPacket = {0};
+      int samples = opus_packet_get_nb_samples(qp->data,qp->size,OPUS_SAMPRATE); // Number of 48 kHz samples
 
       int32_t jump = (int32_t)(qp->rtp.timestamp - sp->rtp_state.timestamp);
       if(jump > 0){
@@ -524,10 +524,7 @@ static int send_opus_queue(struct session * const sp,bool flush){
       int ret = ogg_stream_packetin(&sp->oggState, &oggPacket);
       (void)ret;
       assert(ret == 0);
-      if(Flushmode) {
-	ogg_flush(sp); // Absolute minimum latency
-      } else {
-	// Just do a normal lazy pageout when it's full
+      {
 	ogg_page oggPage;
 	while (ogg_stream_pageout(&sp->oggState, &oggPage)){
 	  fwrite(oggPage.header, 1, oggPage.header_len, sp->fp);
@@ -546,6 +543,8 @@ static int send_opus_queue(struct session * const sp,bool flush){
     qp->inuse = false;
     count++;
   }
+  if(Flushmode)
+    ogg_flush(sp); // Absolute minimum latency
   return count;
 }
 // if !flush, send whatever's on the queue, up to the first missing segment
@@ -850,7 +849,7 @@ static void input_loop(){
 	  fprintf(stderr,"flush failed on '%s', %s\n",sp->filename,strerror(errno));
 	}
       if(((FileLengthLimit != 0) || (max_length != 0)) && sp->samples_remaining <= 0)
-	close_file(sp); // Don't reset RTP here so we won't lose samples on the next file
+	close_file(sp,"size limit"); // Don't reset RTP here so we won't lose samples on the next file
 
     } // end of packet processing
   datadone:;
@@ -865,7 +864,7 @@ static void input_loop(){
 	int64_t idle = current_time - sp->last_active;
 	if(idle > Timeout * BILLION){
 	  // Close idle file
-	  close_file(sp); // sp will be NULL
+	  close_file(sp,"idle timeout"); // sp will be NULL
 	  sp->rtp_state.init = false; // reinit rtp on next packet so we won't emit lots of silence
 	}
       }
@@ -1126,7 +1125,7 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
 	    sp->chan.preset);
     if(sp->starting_offset > 0)
       fprintf(stderr," offset %lld",(long long)sp->starting_offset);
-    fputc('\n',stderr);
+    fprintf(stderr," from %s\n",formatsock(&sp->sender,false));
   }
 
   sp->iobuffer = malloc(BUFFERSIZE);
@@ -1145,7 +1144,7 @@ int session_file_init(struct session *sp,struct sockaddr const *sender){
   attrprintf(fd,"multicast","%s",PCM_mcast_address_text);
   attrprintf(fd,"unixstarttime","%ld.%09ld",(long)now.tv_sec,(long)now.tv_nsec);
 
-  if(sp->frontend.description)
+  if(strlen(sp->frontend.description) > 0)
     attrprintf(fd,"description","%s",sp->frontend.description);
 
   if(sp->starting_offset != 0)
@@ -1164,13 +1163,19 @@ static int close_session(struct session **spp){
   if(sp == NULL)
     return -1;
 
-  close_file(sp);
+  close_file(sp,"session closed");
   if(sp->prev)
     sp->prev->next = sp->next;
   else
     Sessions = sp->next;
   if(sp->next)
     sp->next->prev = sp->prev;
+  // when the max_length (-x) option is used, valgrind has
+  // intermittently reported unfree'd allocations in the resequencing
+  // queue at program exit. Not sure what only -x is affected.
+  for(int i=0;i < RESEQ;i++){
+    FREE(sp->reseq[i].data);
+  }
   FREE(sp);
   return 0;
 }
@@ -1178,7 +1183,7 @@ static int close_session(struct session **spp){
 
 // Close a file, update .wav header
 // If the file is not "substantial", just delete it
-static int close_file(struct session *sp){
+static int close_file(struct session *sp,char const *reason){
   if(sp == NULL)
     return -1;
 
@@ -1191,10 +1196,12 @@ static int close_file(struct session *sp){
     end_wav_stream(sp);
 
   if(Verbose){
-    fprintf(stderr,"%s closing '%s' %'.1f sec\n",
+    fprintf(stderr,"%s closing '%s' %'.1f sec",
 	    sp->frontend.description,
 	    sp->filename, // might be blank
             (float)sp->samples_written / sp->samprate);
+    if(reason != NULL)
+      fprintf(stderr," (%s)\n",reason);
   }
   if(Verbose > 1 && (sp->rtp_state.dupes != 0 || sp->rtp_state.drops != 0))
     fprintf(stderr,"ssrc %u dupes %llu drops %llu\n",sp->ssrc,(long long unsigned)sp->rtp_state.dupes,(long long unsigned)sp->rtp_state.drops);
@@ -1267,7 +1274,7 @@ static int start_ogg_opus_stream(struct session *sp){
   // Opus won't use more bits when the input is actually mono and/or at a lower rate
   opusHeader.channels = 2;
   opusHeader.preskip = 312;
-  opusHeader.samprate = 48000;
+  opusHeader.samprate = OPUS_SAMPRATE;
   opusHeader.gain = 0;
   opusHeader.map_family = 0;
 
@@ -1338,7 +1345,7 @@ static int emit_ogg_opus_tags(struct session *sp){
     snprintf(temp,sizeof(temp),"DATE=%s",datestring);
     wp = encodeTagString(wp,sizeof(opusTags) - (wp - opusTags),temp);
   }
-  if(sp->frontend.description != NULL){
+  {
     char temp[256];
     snprintf(temp,sizeof(temp),"DESCRIPTION=%s",sp->frontend.description);
     wp = encodeTagString(wp,sizeof(opusTags) - (wp - opusTags),temp);

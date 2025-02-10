@@ -1,3 +1,4 @@
+// Not maintained since radiod has a built-in FM stereo decoder
 // Transcoder (multicast in/out) that decodes a FM composite signal @ 384 kHz
 // to a stereo signal @ 48 kHz
 // Part of ka9q-radio. This is a standalone daemon, an alternative to the (very similar) built-in decoder
@@ -229,6 +230,7 @@ int main(int argc,char * const argv[]){
     if(!pkt)
       pkt = malloc(sizeof(*pkt));
     // Zero these out to catch any uninitialized derefs
+    assert(pkt != NULL);
     pkt->next = NULL;
     pkt->data = NULL;
     pkt->len = 0;

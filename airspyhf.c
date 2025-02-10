@@ -65,6 +65,7 @@ int airspyhf_setup(struct frontend * const frontend,dictionary * const Dictionar
   assert(Dictionary != NULL);
 
   struct sdrstate * const sdr = calloc(1,sizeof(struct sdrstate));
+  assert(sdr != NULL);
   // Cross-link generic and hardware-specific control structures
   sdr->frontend = frontend;
   frontend->context = sdr;
@@ -185,12 +186,9 @@ int airspyhf_setup(struct frontend * const frontend,dictionary * const Dictionar
 	    hf_agc,agc_thresh,hf_att,hf_lna,lib_dsp);
   }
   {
-    char const *p = config_getstring(Dictionary,section,"description",NULL);
-    if(p != NULL){
-      FREE(frontend->description);
-      frontend->description = strdup(p);
-      fprintf(stdout,"%s: ",frontend->description);
-    }
+    char const * const p = config_getstring(Dictionary,section,"description",NULL);
+    if(p != NULL)
+      strlcpy(frontend->description,p,sizeof(frontend->description));
   }
   double init_frequency = 0;
   {
@@ -266,8 +264,7 @@ static int rx_callback(airspyhf_transfer_t *transfer){
   frontend->timestamp = gps_time_ns();
   write_cfilter(&frontend->in,NULL,sampcount); // Update write pointer, invoke FFT
   if(isfinite(in_energy)){
-    frontend->if_power_instant = in_energy / sampcount;
-    frontend->if_power += Power_smooth * (frontend->if_power_instant - frontend->if_power);
+    frontend->if_power += Power_smooth * (in_energy / sampcount - frontend->if_power);
   }
   return 0;
 }

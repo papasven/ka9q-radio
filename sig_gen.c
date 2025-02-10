@@ -70,6 +70,7 @@ int sig_gen_setup(struct frontend * const frontend, dictionary * const dictionar
   }
   // Cross-link generic and hardware-specific control structures
   struct sdrstate * const sdr = calloc(1,sizeof(*sdr));
+  assert(sdr != NULL);
   sdr->frontend = frontend;
   frontend->context = sdr;
 
@@ -101,7 +102,8 @@ int sig_gen_setup(struct frontend * const frontend, dictionary * const dictionar
   }
   {
     char const * const p = config_getstring(dictionary,section,"description","funcube dongle+");
-    frontend->description = strdup(p);
+    if(p != NULL)
+      strlcpy(frontend->description,p,sizeof(frontend->description));
   }
 
   //  double initfreq = config_getint(dictionary,section,"frequency",0);
@@ -288,8 +290,7 @@ static void *proc_sig_gen(void *arg){
     // to vary, causing the reported input level to bobble around the nominal value. Long refresh intervals with 'control'
     // will smooth this out, but it's annoying
     frontend->samples += blocksize;    
-    frontend->if_power_instant = if_energy / blocksize;
-    frontend->if_power = Power_smooth * (frontend->if_power_instant - frontend->if_power);
+    frontend->if_power = Power_smooth * (if_energy / blocksize - frontend->if_power);
     // Get status timestamp from UNIX TOD clock
     // Request a half block sleep since this is only the minimum
     {

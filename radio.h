@@ -61,7 +61,7 @@ struct frontend {
   int L;            // Block length of input filter
 
   // Stuff maintained by our upstream source and filled in by the status daemon
-  char *description;  // free-form text, must be unique per radiod instance
+  char description[128];  // free-form text, must be unique per radiod instance
   int samprate;      // Nominal (requested) sample rate on raw input data stream, needs to be integer for filter stuff
   int64_t timestamp; // Nanoseconds since GPS epoch 6 Jan 1980 00:00:00 UTC
   double frequency;
@@ -97,7 +97,6 @@ struct frontend {
       so full A/D range now corresponds to different levels internally, and are scaled
       in radio_status.c when sending status messages
   */
-  float if_power_instant; // instantaneous receive power
   float if_power;   // Exponentially smoothed power measurement in A/D units (not normalized)
   float if_power_max;
 

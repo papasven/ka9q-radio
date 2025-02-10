@@ -169,6 +169,7 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   }
   config_validate_section(stdout,dictionary,section,Rx888_keys,NULL);
   struct sdrstate * const sdr = calloc(1,sizeof(struct sdrstate));
+  assert(sdr != NULL);
   // Cross-link generic and hardware-specific control structures
   sdr->frontend = frontend;
   frontend->context = sdr;
@@ -306,9 +307,8 @@ int rx888_setup(struct frontend * const frontend,dictionary const * const dictio
   control_send_byte(sdr->dev_handle,I2CWFX3,SI5351_ADDR,SI5351_REGISTER_CLK_BASE+0,clock_control);
   {
     char const *p = config_getstring(dictionary,section,"description","rx888");
-    FREE(frontend->description);
-    frontend->description = strdup(p);
-    fprintf(stdout,"%s: ",frontend->description);
+    if(p != NULL)
+      strlcpy(frontend->description,p,sizeof(frontend->description));
   }
   double ferror = actual - samprate;
   float xfer_time = (float)(sdr->reqsize * sdr->pktsize) / (sizeof(int16_t) * frontend->samprate);
@@ -548,10 +548,7 @@ static void rx_callback(struct libusb_transfer * const transfer){
   write_rfilter(&frontend->in,NULL,sampcount); // Update write pointer, invoke FFT if block is complete
 
   // These blocks are kinda small, so exponentially smooth the power readings
-  {
-    frontend->if_power_instant  = (float)in_energy / sampcount;
-    frontend->if_power += Power_smooth * (frontend->if_power_instant - frontend->if_power);
-  }
+  frontend->if_power += Power_smooth * (in_energy / sampcount - frontend->if_power);
   frontend->samples += sampcount; // Count original samples
   if(!Stop_transfers) {
     if(libusb_submit_transfer(transfer) == 0)
