@@ -221,7 +221,6 @@ int start_demod(struct channel * chan){
     fprintf(stdout,"start_demod: ssrc %'u, output %s, demod %d, freq %'.3lf, preset %s, filter (%'+.0f,%'+.0f)\n",
 	    chan->output.rtp.ssrc, chan->output.dest_string, chan->demod_type, chan->tune.freq, chan->preset, chan->filter.min_IF, chan->filter.max_IF);
   }
-  ASSERT_ZEROED(&chan->demod_thread,sizeof chan->demod_thread);
   pthread_create(&chan->demod_thread,NULL,demod_thread,chan);
   return 0;
 }
@@ -262,6 +261,7 @@ int close_chan(struct channel *chan){
   return 0;
 }
 
+pthread_mutex_t Freq_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Set receiver frequency
 // The new IF is computed here only to determine if the front end needs retuning
@@ -280,6 +280,7 @@ double set_freq(struct channel * const chan,double const f){
   if(f == 0)
     return f;
 
+  pthread_mutex_lock(&Freq_mutex); // Protect front end tuner
   // Determine new IF
   double new_if = f - Frontend.frequency;
 
@@ -287,20 +288,19 @@ double set_freq(struct channel * const chan,double const f){
   // Tune an extra kHz to account for front end roundoff
   // Ideally the front end would just round in a preferred direction
   // but it doesn't know where our IF will be so it can't make the right choice
+  // Retuning the front end will cause all the other channels to recalculate their own IFs
+  // What if the IF is wider than the receiver can supply?
   double const fudge = 1000;
   if(new_if > Frontend.max_IF - chan->filter.max_IF){
     // Retune LO1 as little as possible
     new_if = Frontend.max_IF - chan->filter.max_IF - fudge;
+    set_first_LO(chan,f - new_if);
   } else if(new_if < Frontend.min_IF - chan->filter.min_IF){
     // Also retune LO1 as little as possible
     new_if = Frontend.min_IF - chan->filter.min_IF + fudge;
-  } else
-    return f; // OK where it is
-
-  double const new_lo1 = f - new_if;
-  // the front end will send its actual new frequency in its status stream,
-  // the front end status decoder will pick it up, and the chans will recalculate their new LOs
-  set_first_LO(chan,new_lo1);
+    set_first_LO(chan,f - new_if);
+  }
+  pthread_mutex_unlock(&Freq_mutex);
   return f;
 }
 
@@ -527,7 +527,11 @@ int downconvert(struct channel *chan){
       send_radio_status(&Metadata_dest_socket,&Frontend,chan); // Send status in response
       chan->status.global_timer = 0; // Just sent one
       // Also send to output stream
-      send_radio_status(&chan->status.dest_socket,&Frontend,chan);
+      if(chan->demod_type != SPECT_DEMOD){
+	// Only send spectrum on status channel, and only in response to poll
+	// Spectrum channel output socket isn't set anyway
+	send_radio_status(&chan->status.dest_socket,&Frontend,chan);
+      }
       chan->status.output_timer = chan->status.output_interval; // Reload
       FREE(chan->status.command);
       reset_radio_status(chan); // After both are sent
@@ -601,8 +605,8 @@ int downconvert(struct channel *chan){
     // Be sure to Initialize chan->filter.bin_shift at startup to something bizarre to force this inequality on first call
     if(shift != chan->filter.bin_shift){
       const int V = 1 + (Frontend.in.ilen / (Frontend.in.impulse_length - 1)); // Overlap factor
-      chan->filter.phase_adjust = cispi(-2.0f*(shift % V)/(double)V); // Amount to rotate on each block for shifts not divisible by V
-      chan->fine.phasor *= cispi((shift - chan->filter.bin_shift) / (2.0f * (V-1))); // One time adjust for shift change
+      chan->filter.phase_adjust = cispi(-2.0*(shift % V)/(double)V); // Amount to rotate on each block for shifts not divisible by V
+      chan->fine.phasor *= cispi((shift - chan->filter.bin_shift) / (2.0 * (V-1))); // One time adjust for shift change
     }
     chan->fine.phasor *= chan->filter.phase_adjust;
   }
@@ -619,7 +623,7 @@ int downconvert(struct channel *chan){
     chan->sig.bb_power = energy;
     chan->sig.bb_energy += energy; // Added once per block
   }
-  chan->filter.bin_shift = shift; // We need this in any case (not really?)
+  chan->filter.bin_shift = shift; // Also used by spectrum to know where to read direct from master
 
   // The N0 noise estimator has a long smoothing time constant, so clamp it when the front end is saturated, e.g. by a local transmitter
   // This works well for channels tuned well away from the transmitter, but not when a channel is tuned near or to the transmit frequency

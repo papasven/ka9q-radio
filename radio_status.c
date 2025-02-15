@@ -120,6 +120,9 @@ int reset_radio_status(struct channel *chan){
   chan->output.energy = 0;
   chan->output.sum_gain_sq = 0;
   chan->status.blocks_since_poll = 0;
+  if(chan->spectrum.bin_data != NULL && chan->spectrum.bin_count != 0)
+    memset(chan->spectrum.bin_data,0,chan->spectrum.bin_count * sizeof(*chan->spectrum.bin_data));
+
   return 0;
 }
 
@@ -359,10 +362,16 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
     case OUTPUT_CHANNELS: // int
       {
 	unsigned int const i = decode_int(cp,optlen);
-	if(i != chan->output.channels && (i == 1 || i == 2)){
-	  flush_output(chan,false,true); // Flush to Ethernet before we change this
-	  chan->output.channels = i;
-	  chan->output.rtp.type = pt_from_info(chan->output.samprate,chan->output.channels,chan->output.encoding);
+	if(i != 1 && i != 2)
+	  break; // invalid
+
+	if(chan->demod_type == WFM_DEMOD){
+	  // Requesting 2 channels enables FM stereo; requesting 1 disables FM stereo
+	  chan->fm.stereo_enable = (i == 2); // note boolean assignment
+	} else if(i != chan->output.channels){
+	    flush_output(chan,false,true); // Flush to Ethernet before we change this
+	    chan->output.channels = i;
+	    chan->output.rtp.type = pt_from_info(chan->output.samprate,chan->output.channels,chan->output.encoding);
 	}
       }
       break;
@@ -515,6 +524,8 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
 	       chan->filter.max_IF/chan->output.samprate,
 	       chan->filter.kaiser_beta);
 
+    set_freq(chan,chan->tune.freq); // Retune if necessary to accommodate edge of passband
+
     if(chan->filter2.blocking > 0){
       // Reset filter2 too, if it's on
       chan->filter2.low = chan->filter.min_IF;
@@ -606,9 +617,9 @@ static int encode_radio_status(struct frontend const *frontend,struct channel co
     encode_double(&bp,SHIFT_FREQUENCY,chan->tune.shift); // Hz
     encode_byte(&bp,AGC_ENABLE,chan->linear.agc); // bool
     if(chan->linear.agc){
-      encode_float(&bp,AGC_HANGTIME,chan->linear.hangtime*(.001 * Blocktime)); // samples -> sec
+      encode_float(&bp,AGC_HANGTIME,chan->linear.hangtime*(.001f * Blocktime)); // samples -> sec
       encode_float(&bp,AGC_THRESHOLD,voltage2dB(chan->linear.threshold)); // amplitude -> dB
-      encode_float(&bp,AGC_RECOVERY_RATE,voltage2dB(chan->linear.recovery_rate)/(.001*Blocktime)); // amplitude/block -> dB/sec
+      encode_float(&bp,AGC_RECOVERY_RATE,voltage2dB(chan->linear.recovery_rate)/(.001f*Blocktime)); // amplitude/block -> dB/sec
     }
     encode_byte(&bp,INDEPENDENT_SIDEBAND,chan->filter2.isb);
     break;
@@ -617,7 +628,14 @@ static int encode_radio_status(struct frontend const *frontend,struct channel co
       encode_float(&bp,PL_TONE,chan->fm.tone_freq);
       encode_float(&bp,PL_DEVIATION,chan->fm.tone_deviation);
     }
-    __attribute__((fallthrough));
+    encode_float(&bp,FREQ_OFFSET,chan->sig.foffset);     // Hz; used differently in linear and fm
+    encode_float(&bp,SQUELCH_OPEN,power2dB(chan->fm.squelch_open));
+    encode_float(&bp,SQUELCH_CLOSE,power2dB(chan->fm.squelch_close));
+    encode_byte(&bp,THRESH_EXTEND,chan->fm.threshold);
+    encode_float(&bp,PEAK_DEVIATION,chan->fm.pdeviation); // Hz
+    encode_float(&bp,DEEMPH_TC,-1.0f/(log1pf(-chan->fm.rate) * chan->output.samprate)); // ad-hoc
+    encode_float(&bp,DEEMPH_GAIN,voltage2dB(chan->fm.gain));
+    break;
   case WFM_DEMOD:  // Note fall-through from FM_DEMOD
     // Relevant only when squelches are active
     encode_float(&bp,FREQ_OFFSET,chan->sig.foffset);     // Hz; used differently in linear and fm
@@ -625,7 +643,7 @@ static int encode_radio_status(struct frontend const *frontend,struct channel co
     encode_float(&bp,SQUELCH_CLOSE,power2dB(chan->fm.squelch_close));
     encode_byte(&bp,THRESH_EXTEND,chan->fm.threshold);
     encode_float(&bp,PEAK_DEVIATION,chan->fm.pdeviation); // Hz
-    encode_float(&bp,DEEMPH_TC,-1.0/(logf(chan->fm.rate) * chan->output.samprate));
+    encode_float(&bp,DEEMPH_TC,-1.0f/(log1pf(-chan->fm.rate) * 48000.0f)); // ad-hoc
     encode_float(&bp,DEEMPH_GAIN,voltage2dB(chan->fm.gain));
     break;
   case SPECT_DEMOD:
@@ -641,7 +659,6 @@ static int encode_radio_status(struct frontend const *frontend,struct channel co
 	  chan->spectrum.bin_data[i] *= scale;
 
 	encode_vector(&bp,BIN_DATA,chan->spectrum.bin_data,chan->spectrum.bin_count);
-	memset(chan->spectrum.bin_data,0,chan->spectrum.bin_count * sizeof(*chan->spectrum.bin_data));
       }
     }
     break;

@@ -251,6 +251,9 @@ int main(int argc,char *argv[]){
     exit(EX_NOINPUT);
   }
   fprintf(stdout,"%d total demodulators started\n",n);
+  if(Ctl_fd == -1 && n == 0){
+    fprintf(stdout,"Warning: no control channel and no static demodulators, radiod won't do anything\n");
+  }
 
   // Measure CPU usage
   int sleep_period = 60;
@@ -545,17 +548,16 @@ static int loadconfig(char const *file){
   // Same remote socket as status
   Ctl_fd = listen_mcast(&Metadata_dest_socket,Iface);
   if(Ctl_fd < 0){
-    fprintf(stdout,"can't listen for commands from %s: %s\n",Metadata_dest_string,strerror(errno));
-    exit(EX_NOHOST);
+    fprintf(stdout,"can't listen for commands from %s: %s; no control channel is set\n",Metadata_dest_string,strerror(errno));
+  } else {
+    if(Ctl_fd >= 3)
+      pthread_create(&Status_thread,NULL,radio_status,NULL);
   }
-  ASSERT_ZEROED(&Status_thread,sizeof Status_thread);
-  if(Ctl_fd >= 3)
-    pthread_create(&Status_thread,NULL,radio_status,NULL);
 
   // Process individual demodulator sections in parallel for speed
   int const nsect = iniparser_getnsec(Configtable);
   pthread_t startup_threads[nsect];
-  memset(startup_threads,0,sizeof startup_threads); // Apparently necessary to prevent segfaults on pthread_join()
+  int nthreads = 0;
   for(int sect = 0; sect < nsect; sect++){
     char const * const sname = iniparser_getsecname(Configtable,sect);
 
@@ -568,11 +570,10 @@ static int loadconfig(char const *file){
     if(config_getboolean(Configtable,sname,"disable",false))
       continue; // section is disabled
 
-    ASSERT_ZEROED(&startup_threads[sect],sizeof startup_threads[sect]);
-    pthread_create(&startup_threads[sect],NULL,process_section,(void *)sname);
+    pthread_create(&startup_threads[nthreads++],NULL,process_section,(void *)sname);
   }
   // Wait for them all to start
-  for(int sect = 0; sect < nsect; sect++){
+  for(int sect = 0; sect < nthreads; sect++){
     pthread_join(startup_threads[sect],NULL);
 #if 0
     printf("startup thread %s joined\n",iniparser_getsecname(Configtable,sect));
@@ -726,7 +727,6 @@ void *process_section(void *p){
 	char sap_dest[] = "224.2.127.254:9875"; // sap.mcast.net
 	resolve_mcast(sap_dest,&chan->sap.dest_socket,0,NULL,0,0);
 	join_group(Output_fd,&chan->sap.dest_socket,iface);
-	ASSERT_ZEROED(&chan->sap.thread,sizeof chan->sap.thread);
 	pthread_create(&chan->sap.thread,NULL,sap_send,chan);
       }
       // RTCP Real Time Control Protocol daemon is optional
@@ -748,7 +748,6 @@ void *process_section(void *p){
 	  }
 	  break;
 	}
-	ASSERT_ZEROED(&chan->rtcp.thread,sizeof chan->rtcp.thread);
 	pthread_create(&chan->rtcp.thread,NULL,rtcp_send,chan);
       }
     }

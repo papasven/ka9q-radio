@@ -336,7 +336,6 @@ int sdrplay_setup(struct frontend * const frontend,dictionary * const Dictionary
 
 int sdrplay_startup(struct frontend * const frontend){
   struct sdrstate * const sdr = (struct sdrstate *)frontend->context;
-  ASSERT_ZEROED(&sdr->monitor_thread, sizeof sdr->monitor_thread);
   pthread_create(&sdr->monitor_thread,NULL,sdrplay_monitor,sdr);
   return 0;
 }
@@ -1138,6 +1137,7 @@ static void rx_callback(int16_t *xi,int16_t *xq,sdrplay_api_StreamCbParamsT *par
   if(!Name_set){
     pthread_setname("sdrplay-cb");
     Name_set = true;
+    realtime(); // do this once
   }
 
   if(sdr->next_sample_num && params->firstSampleNum != sdr->next_sample_num){

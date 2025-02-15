@@ -12,7 +12,7 @@ Prerequisites
 
 To build and install this package on Debian (including the Raspberry Pi), install the prerequisite packages:
 
-sudo apt install avahi-utils build-essential make gcc libairspy-dev libairspyhf-dev libavahi-client-dev libbsd-dev libfftw3-dev libhackrf-dev libiniparser-dev libncurses5-dev libopus-dev librtlsdr-dev libusb-1.0-0-dev libusb-dev portaudio19-dev libasound2-dev uuid-dev rsync libogg-dev libsamplerate-dev libliquid-dev
+sudo apt install avahi-utils build-essential make gcc libairspy-dev libairspyhf-dev libavahi-client-dev libbsd-dev libfftw3-dev libhackrf-dev libiniparser-dev libncurses5-dev libopus-dev librtlsdr-dev libusb-1.0-0-dev libusb-dev portaudio19-dev libasound2-dev uuid-dev rsync libogg-dev libsamplerate-dev libliquid-dev libncursesw5-dev
 
 (libliquid-dev isn't actually used yet, but it probably will be soon.)
 
@@ -55,7 +55,7 @@ you add your own user ID to the **radio** group so you can
 modify most of the relevant installed directories and files without
 becoming root:
 
-$ sudo addgroup your_user_name radio
+$ sudo adduser your_user_name radio
 
 Membership in a few other groups can minimize the need to run as root:
 

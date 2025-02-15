@@ -148,6 +148,9 @@ int create_filter_input(struct filter_in *master,int const L,int const M, enum f
   ASSERT_ZEROED(master,sizeof *master);
 #endif
 
+  // If there are no worker threads, do it inline
+  master->perform_inline = (N_worker_threads == 0);
+
   for(int i=0; i < ND; i++){
     master->fdomain[i] = lmalloc(sizeof(complex float) * bins);
     master->completed_jobs[i] = (unsigned int)-1; // So startup won't drop any blocks
@@ -910,12 +913,7 @@ static float noise_gain(struct filter_out const * const slave){
   // the factor N compensates for the unity gain scaling
   // Amplitude is pre-scaled 1/N for the concatenated (FFT/IFFT) round trip, so the overall power
   // is scaled 1/N^2. Multiplying by N gives us correct power in the frequency domain (just the FFT)
-
-  // The factor of 2 undoes the 1/sqrt(2) amplitude scaling required for unity signal gain in these two modes
-  if(slave->out_type == REAL || slave->out_type == CROSS_CONJ)
-    return 2 * master->bins * sum;
-  else
-    return master->bins * sum;
+  return master->bins * sum;
 }
 
 
@@ -934,7 +932,7 @@ int set_filter(struct filter_out * const slave,float low,float high,float const 
   int const L = slave->olen;
   int const M = N - L + 1; // Length of impulse response in time domain
 
-  float const gain = (slave->out_type == COMPLEX ? 1.0 : M_SQRT1_2) / (float)slave->master->bins;
+  float const gain = 1.0f / (float)slave->master->bins;
   complex float * const response = lmalloc(sizeof(*response) * N);
   assert(response != NULL);
   float real_coeff[M];
@@ -1199,7 +1197,7 @@ int set_filter(struct filter_out * const slave,float low,float high,float const 
   int const L = slave->olen;
   int const M = N - L + 1; // Length of impulse response in time domain
 
-  float const gain = (slave->out_type == COMPLEX ? 1.0 : M_SQRT1_2) / (float)slave->master->bins;
+  float const gain = 1.0f / (float)slave->master->bins;
 
   complex float * const response = lmalloc(sizeof(complex float) * slave->bins);
   assert(response != NULL);

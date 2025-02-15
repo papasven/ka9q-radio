@@ -76,7 +76,7 @@ int main(int argc,char *argv[]){
 	details = true;
 	break;
       case 'f':
-	frequency = strtof(optarg,NULL);
+	frequency = parse_frequency(optarg,true);
 	break;
       case 'h':
 	help();
@@ -146,12 +146,12 @@ int main(int argc,char *argv[]){
     encode_eol(&bp);
     int const command_len = bp - buffer;
     if(Verbose > 1){
-      printf("Sent:");
-      dump_metadata(stdout,buffer+1,command_len-1,details ? true : false);
+      fprintf(stderr,"Sent:");
+      dump_metadata(stderr,buffer+1,command_len-1,details ? true : false);
     }
     if(sendto(Ctl_fd, buffer, command_len, 0, &Metadata_dest_socket, sizeof Metadata_dest_socket) != command_len){
       perror("command send");
-      usleep(1000000); // 1 second
+      usleep(10000); // 10 millisec
       goto again;
     }
     // The deadline starts at 1 sec after a command
@@ -180,28 +180,29 @@ int main(int argc,char *argv[]){
       // Read message on the multicast group
       socklen_t ssize = sizeof(Metadata_source_socket);
       length = recvfrom(Status_fd,buffer,sizeof(buffer),0,(struct sockaddr *)&Metadata_source_socket,&ssize);
-    
+
       // Ignore invalid packets, non-status packets, packets re other SSRCs and packets not in response to our polls
       // Should we insist on the same command tag, or accept any "recent" status packet, e.g., triggered by the control program?
       // This is needed because an initial delay in joining multicast groups produces a burst of buffered responses; investigate this
     } while(length < 2 || (enum pkt_type)buffer[0] != STATUS || Ssrc != get_ssrc(buffer+1,length-1) || tag != get_tag(buffer+1,length-1));
 
     if(Verbose > 1){
-      printf("Received:");
-      dump_metadata(stdout,buffer+1,length-1,details ? true : false);
+      fprintf(stderr,"Received:");
+      dump_metadata(stderr,buffer+1,length-1,details ? true : false);
     }
     float powers[PKTSIZE / sizeof(float)]; // floats in a max size IP packet
     uint64_t time;
     double r_freq;
     double r_bin_bw;
-    
+
     int npower = extract_powers(powers,sizeof(powers) / sizeof (powers[0]), &time,&r_freq,&r_bin_bw,Ssrc,buffer+1,length-1);
-    if(npower < 0){
-      printf("Invalid response, length %d\n",npower);
-      continue; // Invalid for some reason
+    if(npower <= 0){
+      fprintf(stderr,"Invalid response, length %d\n",npower);
+      usleep(10000); // 10 millisec
+      continue; // Invalid for some reason; retry
     }
     // Note from VK5QI:
-    // the output format from that utility matches that produced by rtl_power, which is: 
+    // the output format from that utility matches that produced by rtl_power, which is:
     //2022-04-02, 16:24:55, 400050181, 401524819, 450.13, 296, -52.95, -53.27, -53.26, -53.24, -53.40, <many more points here>
     // date, time, start_frequency, stop_frequency, bin_size_hz, number_bins, data0, data1, data2
 
@@ -217,24 +218,38 @@ int main(int argc,char *argv[]){
     printf(" %.0f, %.0f, %.0f, %d",
 	   base, base + r_bin_bw * (npower-1), r_bin_bw, npower);
 
+    // Find lowest non-zero entry, use the same for zero power to avoid -infinity dB
+    // Zero power in any bin is unlikely unless they're all zero, but handle it anyway
+    float lowest = INFINITY;
+    for(int i=0; i < npower; i++){
+      if(powers[i] < 0){
+	fprintf(stderr,"Invalid power %g in response\n",powers[i]);
+	usleep(10000); // 10 millisec
+	goto again; // negative powers are invalid
+      }
+      if(powers[i] > 0 && powers[i] < lowest)
+	lowest = powers[i];
+    }
+    float const min_db = lowest != INFINITY ? power2dB(lowest) : 0;
+
     if (details){
       // Frequencies below center
       printf("\n");
       for(int i=first_neg_bin ; i < npower; i++){
-        printf("%d %f %.2f\n",i,base,(powers[i] == 0) ? -100.0 : 10*log10(powers[i]));
+        printf("%d %f %.2f\n",i,base,(powers[i] == 0) ? min_db : power2dB(powers[i]));
         base += r_bin_bw;
       }
       // Frequencies above center
       for(int i=0; i < first_neg_bin; i++){
-        printf("%d %f %.2f\n",i,base,(powers[i] == 0) ? -100.0 : 10*log10(powers[i]));
+        printf("%d %f %.2f\n",i,base,(powers[i] == 0) ? min_db : power2dB(powers[i]));
         base += r_bin_bw;
       }
     } else {
       for(int i= first_neg_bin; i < npower; i++)
-        printf(", %.2f",(powers[i] == 0) ? -100.0 : 10*log10(powers[i]));
+        printf(", %.2f",(powers[i] == 0) ? min_db : power2dB(powers[i]));
       // Frequencies above center
       for(int i=0; i < first_neg_bin; i++)
-        printf(", %.2f",(powers[i] == 0) ? -100.0 : 10*log10(powers[i]));
+        printf(", %.2f",(powers[i] == 0) ? min_db : power2dB(powers[i]));
     }
     printf("\n");
     if(--count == 0)
@@ -256,11 +271,11 @@ int extract_powers(float *power,int npower,uint64_t *time,double *freq,double *b
 #endif
   int l_ccount = 0;
   uint8_t const *cp = buffer;
-  int l_count;
+  int l_count = 0;
 
   while(cp - buffer < length){
     enum status_type const type = *cp++; // increment cp to length field
-    
+
     if(type == EOL)
       break; // End of list
 
@@ -328,6 +343,7 @@ int extract_powers(float *power,int npower,uint64_t *time,double *freq,double *b
   }
  done:
   ;
-  assert(l_ccount == l_count);
-  return l_ccount;
+  if(l_ccount == 0 || l_count != l_ccount)
+    return 0;
+  return l_count;
 }

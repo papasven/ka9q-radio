@@ -49,6 +49,8 @@ int demod_wfm(void *arg){
   if(chan->output.channels == 0)
     chan->output.channels = 2; // Default to stereo
 
+  chan->fm.stereo_enable = (chan->output.channels == 2); // note boolean assignment
+
   // Make these blocksizes depend on front end sample rate and blocksize
   int const composite_L = roundf(Composite_samprate * Blocktime * .001); // Intermediate sample rate
   int const composite_M = composite_L + 1; // 2:1 overlap (50%)
@@ -70,6 +72,8 @@ int demod_wfm(void *arg){
 	     chan->filter.max_IF/Composite_samprate,
 	     chan->filter.kaiser_beta);
 
+  set_freq(chan,chan->tune.freq); // Retune if necessary to accommodate edge of passband
+
   float phase_memory = 0;  // Demodulator input phase memory
   int squelch_state = 0; // Number of blocks for which squelch remains open
 
@@ -89,7 +93,7 @@ int demod_wfm(void *arg){
   // FCC says +/- 2 Hz, with +/- 20 Hz protected (73.322)
   struct filter_out pilot;
   create_filter_output(&pilot,&composite,NULL,audio_L, COMPLEX);
-  set_filter(&pilot,-20./Audio_samprate, 20./Audio_samprate, chan->filter.kaiser_beta);
+  set_filter(&pilot,-100./Audio_samprate, 100./Audio_samprate, chan->filter.kaiser_beta);
 
   // Stereo difference (L-R) information on DSBSC carrier at 38 kHz
   // Extends +/- 15 kHz around 38 kHz
@@ -117,7 +121,6 @@ int demod_wfm(void *arg){
   while(downconvert(chan) == 0){
     // Power squelch
     float snr = (chan->sig.bb_power / (chan->sig.n0 * fabsf(chan->filter.max_IF - chan->filter.min_IF))) - 1;
-    snr = fm_snr(snr);
     chan->sig.snr = max(0.0f,snr); // Smoothed values can be a little inconsistent
 
     // Hysteresis
@@ -150,7 +153,7 @@ int demod_wfm(void *arg){
       float peak_positive_deviation = 0;
       float peak_negative_deviation = 0;
       float frequency_offset = 0;
-      
+
       for(int n=0; n < composite_L; n++){
 	frequency_offset += composite.input_write_pointer.r[n];
 	if(composite.input_write_pointer.r[n] > peak_positive_deviation)
@@ -164,7 +167,7 @@ int demod_wfm(void *arg){
       // exact value would be 1 - exp(-blocktime/tc)
       float const alpha = .001f * Blocktime;
       chan->sig.foffset += alpha * (frequency_offset - chan->sig.foffset);
-      
+
       // Remove frequency offset from deviation peaks and scale to full cycles
       peak_positive_deviation *= Composite_samprate * 0.5f;
       peak_negative_deviation *= Composite_samprate * 0.5f;
@@ -182,7 +185,7 @@ int demod_wfm(void *arg){
     chan->output.gain = (2 * chan->output.headroom * Composite_samprate) / fabsf(chan->filter.min_IF - chan->filter.max_IF);
 
     bool pilot_present = false;
-    if(chan->output.channels == 2){
+    if(chan->fm.stereo_enable){
       // See if a subcarrier is present
       // shift signs for pilot and subcarrier don't matter because the filters are real input with symmetric spectra
       execute_filter_output(&pilot,pilot_shift); // pilot spun to 0 Hz, 48 kHz rate
@@ -198,6 +201,10 @@ int demod_wfm(void *arg){
     }
     if(pilot_present){
       // Stereo multiplex processing
+      if(chan->output.channels != 2){
+	chan->output.channels = 2;
+	chan->output.rtp.type = pt_from_info(chan->output.samprate,chan->output.channels,chan->output.encoding); // make sure it's initialized
+      }
       execute_filter_output(&lminusr,subc_shift); // L-R composite spun down to 0 Hz, 48 kHz rate
 
       float complex stereo_buffer[audio_L];
@@ -205,7 +212,7 @@ int demod_wfm(void *arg){
       for(int n = 0; n < audio_L; n++){
 	complex float subc_phasor = pilot.output.c[n]; // 19 kHz pilot
 	subc_phasor = (subc_phasor * subc_phasor) / cnrmf(subc_phasor); // square to 38 kHz and normalize
-	float subc_info = __imag__ (conjf(subc_phasor) * lminusr.output.c[n]); // Carrier is in quadrature
+	float subc_info = 2.0f * __imag__ (conjf(subc_phasor) * lminusr.output.c[n]); // Carrier is in quadrature
 	assert(!isnan(subc_info));
 	assert(!isnan(mono.output.r[n]));
 	// demultiplex: 2L = (L+R) + (L-R); 2R = (L+R) - (L-R)
@@ -220,11 +227,14 @@ int demod_wfm(void *arg){
       }
       output_level /= (2 * audio_L); // Halve power to get level per channel
       chan->output.energy += output_level;
-      assert(chan->output.channels == 2); // Has to be, to get here
       if(send_output(chan,(const float *)stereo_buffer,audio_L,false) < 0)
 	break; // No output stream! Terminate
     } else { // pilot_present == false
       // Mono processing
+      if(chan->output.channels != 1){
+	chan->output.channels = 1;
+	chan->output.rtp.type = pt_from_info(chan->output.samprate,chan->output.channels,chan->output.encoding); // make sure it's initialized
+      }
       float output_level = 0;
       if(chan->fm.rate != 0){
 	// Apply deemphasis
@@ -243,12 +253,8 @@ int demod_wfm(void *arg){
       output_level /= audio_L;
       chan->output.energy += output_level;
 
-      // stash channel count in case user is requesting stereo when it's not available
-      int channels_save = chan->output.channels;
-      chan->output.channels = 1;
       if(send_output(chan,mono.output.r,audio_L,false) < 0)
 	break; // No output stream! Terminate
-      chan->output.channels = channels_save;
     }
   }
  quit:;
