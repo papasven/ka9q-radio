@@ -247,6 +247,7 @@ struct channel {
     OpusEncoder *opus;
     unsigned int opus_channels;
     unsigned int opus_bitrate;
+    int opus_bandwidth;
     float *queue; // Mirrored ring buffer
     size_t queue_size; // Size of allocation, in floats
     unsigned wp,rp; // Queue write and read indices
@@ -312,6 +313,7 @@ double set_first_LO(struct channel const * restrict, double);
 // Routines common to the internals of all channel demods
 int compute_tuning(int N, int M, int samprate,int *shift,double *remainder, double freq);
 int downconvert(struct channel *chan);
+int set_channel_filter(struct channel *chan);
 
 // extract front end scaling factors (depends on width of A/D sample)
 float scale_voltage_out2FS(struct frontend *frontend);
