@@ -77,6 +77,8 @@ static float const SCALE8 = 1./INT8_MAX;  // Scale signed 8-bit int to float in 
 
 void realtime(void);
 bool norealtime(void);
+// Custom version of malloc that aligns to a cache line
+void *lmalloc(size_t size);
 
 // I *hate* this sort of pointless, stupid, gratuitous incompatibility that
 // makes a lot of code impossible to read and debug
@@ -153,6 +155,19 @@ static inline int init_recursive_mutex(pthread_mutex_t *m){
 #define cispif(x) csincospif(x)
 #define cis(x) csincos(x)
 #define cispi(x) csincospi(x)
+
+// Sin(πf)
+static inline float sinpif(float x){
+  return sinf(x * M_PI);
+}
+
+// Normalized sinc function sin(πx) / πx
+static inline float sinc(float x){
+  if(x == 0)
+    return 1;
+  return sinpif(x) / (M_PI * x);
+}
+
 
 extern const char *App_path;
 extern int Verbose;
@@ -313,6 +328,8 @@ static inline void mirror_wrap(void const **p, void const * const base,size_t co
 
 // round argument up to an even number of system pages
 size_t round_to_page(size_t size);
+
+uint32_t round2(uint32_t v);
 
 void drop_cache(void *mem,size_t bytes);
 

@@ -61,6 +61,9 @@ void dump_metadata(FILE *fp,uint8_t const * const buffer,int length,bool newline
 	FREE(d);
       }
       break;
+    case RTP_TIMESTAMP:
+      fprintf(fp,"RTP timestamp %'u",decode_int32(cp,optlen));
+      break;
     case STATUS_DEST_SOCKET:
       {
 	struct sockaddr_storage sock;
@@ -169,6 +172,9 @@ void dump_metadata(FILE *fp,uint8_t const * const buffer,int length,bool newline
       break;
     case KAISER_BETA:
       fprintf(fp,"filter kaiser_beta %g",decode_float(cp,optlen));
+      break;
+    case FILTER2_KAISER_BETA:
+      fprintf(fp,"filter2 kaiser_beta %g",decode_float(cp,optlen));
       break;
     case FILTER_BLOCKSIZE:
       fprintf(fp,"filter L %'d",decode_int(cp,optlen));
@@ -343,7 +349,8 @@ void dump_metadata(FILE *fp,uint8_t const * const buffer,int length,bool newline
 	fprintf(fp,"fft bins:");
 	int count = optlen/sizeof(float);
 	for(int i=0; i < count; i++){
-	  fprintf(fp," %.1g",decode_float(cp + i * sizeof(float),sizeof(float)));
+	  float x = decode_float(cp + i * sizeof(float),sizeof(float));
+	  fprintf(fp," %.0f",power2dB(x));
 	}
       }
       break;

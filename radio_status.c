@@ -116,13 +116,11 @@ int send_radio_status(struct sockaddr const *sock,struct frontend const *fronten
 }
 int reset_radio_status(struct channel *chan){
   // Reset integrators
-  chan->sig.bb_energy = 0;
-  chan->output.energy = 0;
-  chan->output.sum_gain_sq = 0;
   chan->status.blocks_since_poll = 0;
+#if 0
   if(chan->spectrum.bin_data != NULL && chan->spectrum.bin_count != 0)
     memset(chan->spectrum.bin_data,0,chan->spectrum.bin_count * sizeof(*chan->spectrum.bin_data));
-
+#endif
   return 0;
 }
 
@@ -222,7 +220,7 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
       {
 	float const f = decode_float(cp,optlen);
 	if(isfinite(f) && f != chan->filter.min_IF){
-	  chan->filter.min_IF = f;
+	  chan->filter.min_IF = max(f,-(float)chan->output.samprate/2);
 	  new_filter_needed = true;
 	}
       }
@@ -231,7 +229,7 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
       {
 	float const f = decode_float(cp,optlen);
 	if(isfinite(f) && chan->filter.max_IF != f){
-	  chan->filter.max_IF = f;
+	  chan->filter.max_IF = min(f,(float)chan->output.samprate/2);
 	  new_filter_needed = true;
 	}
       }
@@ -241,6 +239,15 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
 	  float const f = fabsf(decode_float(cp,optlen));
 	  if(isfinite(f) && chan->filter.kaiser_beta != f){
 	    chan->filter.kaiser_beta = f;
+	    new_filter_needed = true;
+	  }
+	}
+      break;
+      case FILTER2_KAISER_BETA: // dimensionless, always 0 or positive
+        {
+	  float const f = fabsf(decode_float(cp,optlen));
+	  if(isfinite(f) && chan->filter2.kaiser_beta != f){
+	    chan->filter2.kaiser_beta = f;
 	    new_filter_needed = true;
 	  }
 	}
@@ -321,18 +328,18 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
 	}
       }
       break;
-    case AGC_HANGTIME: // seconds -> blocktimes
+    case AGC_HANGTIME: // seconds
       {
 	float const f = decode_float(cp,optlen);
 	if(isfinite(f))
-	  chan->linear.hangtime = fabsf(f) / (.001 * Blocktime);
+	  chan->linear.hangtime = fabsf(f);
       }
       break;
     case AGC_RECOVERY_RATE: // dB/sec -> amplitude / block times, always positive
       {
 	float const f = decode_float(cp,optlen);
 	if(isfinite(f))
-	  chan->linear.recovery_rate = dB2voltage(fabsf(f) * .001 * Blocktime);
+	  chan->linear.recovery_rate = dB2voltage(fabsf(f));
       }
       break;
     case AGC_THRESHOLD: // dB -> amplitude
@@ -471,7 +478,9 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
     case FILTER2:
       {
 	unsigned int i = decode_int(cp,optlen);
-	if(i <= 4 && i != chan->filter2.blocking){
+	if(i > 10)
+	  i = 10;
+	if(i != chan->filter2.blocking){
 	  chan->filter2.blocking = i;
 	  new_filter_needed = true;
 	}
@@ -496,6 +505,7 @@ bool decode_radio_commands(struct channel *chan,uint8_t const *buffer,int length
     // Retune if necessary to accommodate edge of passband
     // but only if a change was commanded, to prevent a tuning war
     set_freq(chan,chan->tune.freq);
+    chan->filter.remainder = NAN; // Force re-init of fine oscillator
   }
   return false;
 }
@@ -516,6 +526,7 @@ static int encode_radio_status(struct frontend const *frontend,struct channel co
   if(strlen(frontend->description) > 0)
     encode_string(&bp,DESCRIPTION,frontend->description,strlen(frontend->description));
 
+  encode_int32(&bp,RTP_TIMESTAMP,chan->output.rtp.timestamp);
   encode_socket(&bp,STATUS_DEST_SOCKET,&Metadata_dest_socket);
   encode_int64(&bp,GPS_TIME,frontend->timestamp);
   encode_int64(&bp,INPUT_SAMPLES,frontend->samples);
@@ -544,10 +555,7 @@ static int encode_radio_status(struct frontend const *frontend,struct channel co
 
   // Adjust for A/D width
   // Level is absolute relative to A/D saturation, so +3dB for real vs complex
-  if(chan->status.blocks_since_poll > 0){
-    float level = frontend->if_power * scale_ADpower2FS(frontend);
-    encode_float(&bp,IF_POWER,power2dB(level));
-  }
+  encode_float(&bp,IF_POWER,power2dB(frontend->if_power * scale_ADpower2FS(frontend)));
   encode_int64(&bp,AD_OVER,frontend->overranges);
   encode_int64(&bp,SAMPLES_SINCE_OVER,frontend->samp_since_over);
   encode_float(&bp,NOISE_DENSITY,power2dB(chan->sig.n0));
@@ -578,9 +586,9 @@ static int encode_radio_status(struct frontend const *frontend,struct channel co
     encode_double(&bp,SHIFT_FREQUENCY,chan->tune.shift); // Hz
     encode_byte(&bp,AGC_ENABLE,chan->linear.agc); // bool
     if(chan->linear.agc){
-      encode_float(&bp,AGC_HANGTIME,chan->linear.hangtime*(.001f * Blocktime)); // samples -> sec
+      encode_float(&bp,AGC_HANGTIME,chan->linear.hangtime); // sec
       encode_float(&bp,AGC_THRESHOLD,voltage2dB(chan->linear.threshold)); // amplitude -> dB
-      encode_float(&bp,AGC_RECOVERY_RATE,voltage2dB(chan->linear.recovery_rate)/(.001f*Blocktime)); // amplitude/block -> dB/sec
+      encode_float(&bp,AGC_RECOVERY_RATE,voltage2dB(chan->linear.recovery_rate)); // amplitude/ -> dB/sec
     }
     encode_byte(&bp,INDEPENDENT_SIDEBAND,chan->filter2.isb);
     break;
@@ -614,11 +622,12 @@ static int encode_radio_status(struct frontend const *frontend,struct channel co
       // encode bin data here? maybe change this, it can be a lot
       // Also need to unwrap this, frequency data is dc....max positive max negative...least negative
       if(chan->spectrum.bin_data != NULL){
+#if 0
 	// Average and clear
 	float const scale = 1.f / chan->status.blocks_since_poll;
 	for(int i=0; i < chan->spectrum.bin_count; i++)
 	  chan->spectrum.bin_data[i] *= scale;
-
+#endif
 	encode_vector(&bp,BIN_DATA,chan->spectrum.bin_data,chan->spectrum.bin_count);
       }
     }
@@ -626,26 +635,25 @@ static int encode_radio_status(struct frontend const *frontend,struct channel co
   default:
     break;
   }
+
+  encode_float(&bp,LOW_EDGE,chan->filter.min_IF); // Hz
+  encode_float(&bp,HIGH_EDGE,chan->filter.max_IF); // Hz
   // Lots of stuff not relevant in spectrum analysis mode
   if(chan->demod_type != SPECT_DEMOD){
-    encode_float(&bp,LOW_EDGE,chan->filter.min_IF); // Hz
-    encode_float(&bp,HIGH_EDGE,chan->filter.max_IF); // Hz
     encode_int32(&bp,OUTPUT_SAMPRATE,chan->output.samprate); // Hz
     encode_int64(&bp,OUTPUT_DATA_PACKETS,chan->output.rtp.packets);
     encode_float(&bp,KAISER_BETA,chan->filter.kaiser_beta); // Dimensionless
     encode_int(&bp,FILTER2,chan->filter2.blocking);
-
-    // BASEBAND_POWER is now the average since last poll
-    if(chan->status.blocks_since_poll > 0){
-      float bb_power = chan->sig.bb_energy / chan->status.blocks_since_poll;
-      encode_float(&bp,BASEBAND_POWER,power2dB(bb_power));
-      // Output levels are already normalized since they scaled by a fixed 32767 for conversion to int16_t
-      float output_power = chan->output.energy / chan->status.blocks_since_poll;
-      encode_float(&bp,OUTPUT_LEVEL,power2dB(output_power)); // power ratio -> dB
-      if(chan->demod_type == LINEAR_DEMOD){ // Gain not really meaningful in FM modes
-	float gain = chan->output.sum_gain_sq / chan->status.blocks_since_poll;
-	encode_float(&bp,GAIN,power2dB(gain));
-      }
+    if(chan->filter2.blocking != 0){
+      encode_int(&bp,FILTER2_BLOCKSIZE,chan->filter2.in.ilen);
+      encode_int(&bp,FILTER2_FIR_LENGTH,chan->filter2.in.impulse_length);
+      encode_float(&bp,FILTER2_KAISER_BETA,chan->filter2.kaiser_beta);
+    }
+    encode_float(&bp,BASEBAND_POWER,power2dB(chan->sig.bb_power));
+    // Output levels are already normalized since they scaled by a fixed 32767 for conversion to int16_t
+    encode_float(&bp,OUTPUT_LEVEL,power2dB(chan->output.power)); // power ratio -> dB
+    if(chan->demod_type == LINEAR_DEMOD){ // Gain not really meaningful in FM modes
+      encode_float(&bp,GAIN,voltage2dB(chan->output.gain));
     }
     encode_int64(&bp,OUTPUT_SAMPLES,chan->output.samples);
     encode_int32(&bp,OPUS_BIT_RATE,chan->output.opus_bitrate);

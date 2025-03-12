@@ -933,6 +933,20 @@ static int process_keyboard(struct channel *channel,uint8_t **bpp,int c){
       }
     }
     break;
+  case 'K': // Kaiser window parameter for filter2
+    {
+      char str[Entry_width],*ptr;
+      getentry("Filter2 Kaiser window β: ",str,sizeof(str));
+      float const b = strtof(str,&ptr);
+      if(ptr != str && isfinite(b)){
+	if(b < 0 || b >= 100){
+	  beep(); // beyond limits
+	} else {
+	  encode_float(bpp,FILTER2_KAISER_BETA,b);
+	}
+      }
+    }
+    break;
   case 'o': // Set/clear option flags, most apply only to linear detector
     {
       char str[Entry_width];
@@ -1001,12 +1015,10 @@ static int process_keyboard(struct channel *channel,uint8_t **bpp,int c){
   case 'F':
     {
       char str[Entry_width],*ptr;
-      getentry("Filter2 blocksize (0-4): ",str,sizeof(str));
+      getentry("Filter2 blocksize (0-10): ",str,sizeof(str));
       unsigned int x = labs(strtol(str,&ptr,0));
-      if(ptr != str){
-	if(x <= 4)
-	  encode_int(bpp,FILTER2,x);
-      }
+      if(ptr != str)
+	encode_int(bpp,FILTER2,x);
     }
     break;
   default:
@@ -1271,8 +1283,8 @@ static void display_filtering(WINDOW *w,struct channel const *channel){
   int col = 1;
   wmove(w,row,col);
   wclrtobot(w);
-  pprintw(w,row++,col,"Fs in","%'d Hz",Frontend.samprate); // Nominal
-  pprintw(w,row++,col,"Fs out","%'d Hz",channel->output.samprate);
+
+
 
   pprintw(w,row++,col,"Block Time","%'.1f ms",Blocktime);
   pprintw(w,row++,col,"Block rate","%'.3f Hz",1000.0/Blocktime); // Just the block rate
@@ -1287,7 +1299,7 @@ static void display_filtering(WINDOW *w,struct channel const *channel){
   }
 
   Overlap = 1 + Frontend.L / (Frontend.M - 1); // recreate original overlap parameter
-  pprintw(w,row++,col,"Overlap","1/%d   ",Overlap);
+  pprintw(w,row++,col,"Overlap","%.1f %% ",100.0f/Overlap);
   pprintw(w,row++,col,"Bin width","%'.3f Hz",(float)Frontend.samprate / N);
 
   float const beta = channel->filter.kaiser_beta;
@@ -1311,9 +1323,23 @@ static void display_filtering(WINDOW *w,struct channel const *channel){
   //  pprintw(w,row++,col,"first null","%'.1f Hz",firstnull * 1000. / Blocktime);
 #endif
 
-  pprintw(w,row++,col,"Filter2","%u   ",channel->filter2.blocking);
   pprintw(w,row++,col,"Drops","%'llu   ",channel->filter.out.block_drops);
-
+  if(channel->filter2.blocking > 0){
+      mvwhline(w,row,0,0,1000);
+      mvwaddstr(w,row++,1,"Filter2");
+      int L = channel->filter2.in.ilen;
+      int M = channel->filter2.in.impulse_length;
+      int N = L+M > 0 ? L + M - 1 : 0;
+      
+      float bt = Blocktime * channel->filter2.blocking;
+      pprintw(w,row++,col,"Block Time","%.1f ms",bt);
+      pprintw(w,row++,col,"Block rate","%.3f Hz",1000./bt);
+      pprintw(w,row++,col,"FFT","%u c ",N);
+      float overlap = 1 + (float)L / (M-1);
+      pprintw(w,row++,col,"Overlap","%.2f %% ",100./overlap);
+      pprintw(w,row++,col,"Bin width","%.3f Hz",1000./(overlap*bt));
+      pprintw(w,row++,col,"Kaiser β","%.1f   ",channel->filter2.kaiser_beta);
+  }      
   box(w,0,0);
   mvwaddstr(w,0,1,"Filtering");
 
@@ -1367,8 +1393,8 @@ static void display_sig(WINDOW *w,struct channel const *channel){
     pprintw(w,row++,col,"S/N","%.1f dB  ",power2dB(Local.sn0/Local.noise_bandwidth));
   if(!isnan(channel->output.gain) && channel->demod_type == LINEAR_DEMOD) // Only relevant in linear
     pprintw(w,row++,col,"Gain","%.1lf dB  ",voltage2dB(channel->output.gain));
-  if(!isnan(channel->output.energy))
-    pprintw(w,row++,col,"Output","%.1lf dBFS",power2dB(channel->output.energy)); // actually level; sender does averaging
+  if(!isnan(channel->output.power))
+    pprintw(w,row++,col,"Output","%.1lf dBFS",power2dB(channel->output.power));
   box(w,0,0);
   mvwaddstr(w,0,1,"Signal");
   wnoutrefresh(w);
@@ -1470,11 +1496,12 @@ static void display_input(WINDOW *w,struct channel const *channel){
   wclrtobot(w);
   char tmp[100];
   pprintw(w,row++,col,"","%s",format_gpstime(tmp,sizeof(tmp),Frontend.timestamp));
-  if(Frontend.samprate != 0)
+  if(Frontend.samprate != 0){
+    pprintw(w,row++,col,"Sample rate","%'d Hz",Frontend.samprate); // Nominal
     pprintw(w,row++,col,"Uptime","%s",ftime(tmp,sizeof(tmp),Frontend.samples/Frontend.samprate));
-  pprintw(w,row++,col,"Overranges","%'llu",Frontend.overranges);
-  if(Frontend.samprate != 0)
+    pprintw(w,row++,col,"Overranges","%'llu",Frontend.overranges);
     pprintw(w,row++,col,"Last overrange","%s",ftime(tmp,sizeof(tmp),Frontend.samp_since_over/Frontend.samprate));
+  }
   mvwhline(w,row,0,0,1000);
   mvwaddstr(w,row++,1,"Status");
   pprintw(w,row++,col,"Source","%s",formatsock(&Metadata_source_socket,true));
@@ -1504,14 +1531,16 @@ static void display_output(WINDOW *w,struct channel const *channel){
   pprintw(w,row++,col,"Dest","%s",formatsock(&channel->output.dest_socket,true));
 
   pprintw(w,row++,col,"SSRC","%u",channel->output.rtp.ssrc);
+  pprintw(w,row++,col,"Timestamp","%'u",channel->output.rtp.timestamp);
   pprintw(w,row++,col,"TTL","%d",Mcast_ttl);
   pprintw(w,row++,col,"Payload Type","%u",channel->output.rtp.type);
+  pprintw(w,row++,col,"Sample rate","%'d Hz",channel->output.samprate);
   pprintw(w,row++,col,"Encoding","%s",encoding_string(channel->output.encoding));
   pprintw(w,row++,col,"Channels","%d",channel->output.channels);
   pprintw(w,row++,col,"Packets","%'llu",(long long unsigned)channel->output.rtp.packets);
   if(channel->output.encoding == OPUS){
     if(channel->output.opus_bitrate != 0)
-      pprintw(w,row++,col,"Opus bitrate","%d",channel->output.opus_bitrate);
+      pprintw(w,row++,col,"Opus bitrate","%'d",channel->output.opus_bitrate);
     else
       pprintw(w,row++,col,"Opus bitrate","auto");
   }

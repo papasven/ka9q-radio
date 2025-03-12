@@ -19,6 +19,8 @@ extern char const *Wisdom_file;
 extern int Nthreads;
 extern int FFTW_planning_level;
 extern double FFTW_plan_timelimit;
+extern pthread_mutex_t FFTW_planning_mutex;
+extern int N_internal_threads;
 
 // Input can be REAL or COMPLEX
 // Output can be REAL, COMPLEX, CROSS_CONJ, i.e., COMPLEX with special cross conjugation for ISB, or SPECTRUM (noncoherent power)
@@ -40,6 +42,7 @@ struct rc {
 #define ND 4
 struct filter_in {
   enum filtertype in_type;           // REAL or COMPLEX
+  int points;               // Size of FFT N = L + M - 1. For complex, == N
   int ilen;                 // Length of user portion of input buffer, aka 'L'
   int bins;                 // Total number of frequency bins. Complex: L + M - 1;  Real: (L + M - 1)/2 + 1
   int impulse_length;       // Length of filter impulse response, aka 'M'
@@ -72,7 +75,6 @@ struct filter_out {
   struct rc output;                  // Beginning of user output area, length L/decimate
   fftwf_plan rev_plan;               // IFFT (frequency -> time)
   unsigned next_jobnum;
-  float noise_gain;                  // Filter gain on uniform noise (ratio < 1)
   unsigned block_drops;          // Lost frequency domain blocks, e.g., from late scheduling of slave thread
   int rcnt;                 // Samples read from output buffer
 };
@@ -81,14 +83,16 @@ int create_filter_input(struct filter_in *,int const L,int const M, enum filtert
 int create_filter_output(struct filter_out *slave,struct filter_in * restrict master,complex float * restrict response,int olen, enum filtertype out_type);
 int execute_filter_input(struct filter_in * restrict);
 int execute_filter_output(struct filter_out * restrict ,int);
-int execute_filter_output_idle(struct filter_out * const slave);
 int delete_filter_input(struct filter_in * restrict);
 int delete_filter_output(struct filter_out * restrict);
 int set_filter(struct filter_out * restrict,float,float,float);
 void *run_fft(void *);
 int write_cfilter(struct filter_in *, complex float const *,int size);
 int write_rfilter(struct filter_in *, float const *,int size);
-
+void suggest(int level,int size,int dir,int clex);
+unsigned long gcd(unsigned long a,unsigned long b);
+unsigned long lcm(unsigned long a,unsigned long b);
+int make_kaiser(float * const window,int const M,float const beta);
 
 // Write complex sample to input side of filter
 static inline int put_cfilter(struct filter_in * restrict const f,complex float const s){ // Complex
